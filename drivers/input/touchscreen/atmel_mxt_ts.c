@@ -201,6 +201,7 @@ enum t100_type {
 #define MXT_CRC_TIMEOUT		1000	/* msec */
 #define MXT_FW_RESET_TIME	3000	/* msec */
 #define MXT_FW_CHG_TIMEOUT	300	/* msec */
+#define MXT_BOOTLOADER_WAIT	3000	/* msec */
 
 /* Command to unlock bootloader */
 #define MXT_UNLOCK_CMD_MSB	0xaa
@@ -595,13 +596,21 @@ static int mxt_bootloader_write(struct mxt_data *data,
 {
 	int ret;
 	struct i2c_msg msg;
+	u8 *data_buf;
+
+	data_buf = kmalloc(count, GFP_KERNEL);
+	if (!data_buf)
+		return -ENOMEM;
+	
+	memcpy(&data_buf[0], val, count);
 
 	msg.addr = data->bootloader_addr;
 	msg.flags = data->client->flags & I2C_M_TEN;
 	msg.len = count;
-	msg.buf = (u8 *)val;
+	msg.buf = data_buf;
 
 	ret = i2c_transfer(data->client->adapter, &msg, 1);
+
 	if (ret == 1) {
 		ret = 0;
 	} else {
@@ -643,6 +652,9 @@ static int mxt_lookup_bootloader_address(struct mxt_data *data, bool retry)
 	}
 
 	data->bootloader_addr = bootloader;
+
+	dev_info(&data->client->dev, "Bootloader address: %x\n", bootloader);
+
 	return 0;
 }
 
@@ -2938,12 +2950,20 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	if (ret) {
 		dev_err(dev, "Unable to open firmware %s\n", fn);
 		return ret;
-	}
+	} else {
+
+		dev_info(dev, "Opened firmware file: %s\n", fn);
+	}  
 
 	/* Check for incorrect enc file */
 	ret = mxt_check_firmware_format(dev, fw);
-	if (ret)
+
+	if (ret) {
 		goto release_firmware;
+	} else {
+
+		dev_info(dev, "File format is okay\n");		
+	}
 
 	if (!data->in_bootloader) {
 		/* Change to the bootloader mode */
@@ -2951,15 +2971,21 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 
 		ret = mxt_t6_command(data, MXT_COMMAND_RESET,
 				     MXT_BOOT_VALUE, false);
-		if (ret)
+		if (ret) {
 			goto release_firmware;
+		} else {
+			dev_info(dev, "Sent bootloader command.\n");
+		}
 
 		msleep(MXT_RESET_TIME);
 
 		/* Do not need to scan since we know family ID */
 		ret = mxt_lookup_bootloader_address(data, 0);
-		if (ret)
+		if (ret) {
 			goto release_firmware;
+		} else {
+			dev_info(dev, "Found bootloader I2C address\n");
+		}	
 
 		mxt_free_input_device(data);
 		mxt_free_object_table(data);
@@ -2995,7 +3021,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 		frame_size += 2;
 
 		/* Write one frame to device */
-		ret = mxt_bootloader_write(data, fw->data + pos, frame_size);
+		ret = mxt_bootloader_write(data, &fw->data[pos], frame_size);
 		if (ret)
 			goto disable_irq;
 
@@ -3016,16 +3042,15 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 			frame++;
 		}
 
-		if (frame % 50 == 0)
-			dev_dbg(dev, "Sent %d frames, %d/%zd bytes\n",
+		if (pos >= fw->size) {
+			dev_info(dev, "Sent %u frames, %zu bytes\n",
+				frame, fw->size);
+		}
+		else if (frame % 50 == 0) {
+			dev_info(dev, "Sent %u frames, %d/%zu bytes\n",
 				frame, pos, fw->size);
+		}
 	}
-
-	/* Wait for flash. */
-	ret = mxt_wait_for_completion(data, &data->bl_completion,
-				      MXT_FW_RESET_TIME);
-	if (ret)
-		goto disable_irq;
 
 	dev_dbg(dev, "Sent %d frames, %d bytes\n", frame, pos);
 
@@ -3034,7 +3059,13 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	 * the CHG line after bootloading has finished, so ignore potential
 	 * errors.
 	 */
-	mxt_wait_for_completion(data, &data->bl_completion, MXT_FW_RESET_TIME);
+
+	msleep(MXT_BOOTLOADER_WAIT);	/* Wait for chip to leave bootloader*/
+	
+	ret = mxt_wait_for_completion(data, &data->bl_completion,
+				      MXT_BOOTLOADER_WAIT);
+	if (ret)
+		goto disable_irq;
 
 	data->in_bootloader = false;
 

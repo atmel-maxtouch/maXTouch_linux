@@ -397,6 +397,10 @@ struct mxt_data {
 	unsigned int t15_num_keys;
 
 	enum mxt_suspend_mode suspend_mode;
+
+	/* Indicates whether device is updating configuration */
+	bool updating_config;
+
 };
 
 struct mxt_vb2_buffer {
@@ -672,7 +676,7 @@ static int mxt_lookup_bootloader_address(struct mxt_data *data, bool retry)
 			bootloader = appmode - 0x24;
 			break;
 		}
-		/* Fall through - for normal case */
+		/* Fall through for normal case */
 	case 0x4c:
 	case 0x4d:
 	case 0x5a:
@@ -987,6 +991,7 @@ static void mxt_proc_t9_message(struct mxt_data *data, u8 *message)
 	int y;
 	int area;
 	int amplitude;
+	int tool;
 
 	id = message[0] - data->T9_reportid_min;
 	status = message[1];
@@ -1029,12 +1034,20 @@ static void mxt_proc_t9_message(struct mxt_data *data, u8 *message)
 			mxt_input_sync(data);
 		}
 
+		/* A size of zero indicates touch is from a linked T47 Stylus */
+		if (area == 0) {
+			area = MXT_TOUCH_MAJOR_DEFAULT;
+			tool = MT_TOOL_PEN;
+		} else {
+			tool = MT_TOOL_FINGER;
+		}
+
 		/* if active, pressure must be non-zero */
 		if (!amplitude)
 			amplitude = MXT_PRESSURE_DEFAULT;
 
 		/* Touch active */
-		input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, 1);
+		input_mt_report_slot_state(input_dev, tool, 1);
 		input_report_abs(input_dev, ABS_MT_POSITION_X, x);
 		input_report_abs(input_dev, ABS_MT_POSITION_Y, y);
 		input_report_abs(input_dev, ABS_MT_PRESSURE, amplitude);
@@ -1061,6 +1074,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 	u8 major = 0;
 	u8 pressure = 0;
 	u8 orientation = 0;
+	bool hover = false;
 
 	id = message[0] - data->T100_reportid_min - 2;
 
@@ -1079,6 +1093,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 		case MXT_T100_TYPE_HOVERING_FINGER:
 			tool = MT_TOOL_FINGER;
 			distance = MXT_DISTANCE_HOVERING;
+			hover = true;
 
 			if (data->t100_aux_vect)
 				orientation = message[data->t100_aux_vect];
@@ -1089,6 +1104,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 		case MXT_T100_TYPE_GLOVE:
 			tool = MT_TOOL_FINGER;
 			distance = MXT_DISTANCE_ACTIVE_TOUCH;
+			hover = false;
 
 			if (data->t100_aux_area)
 				major = message[data->t100_aux_area];
@@ -1103,6 +1119,8 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 
 		case MXT_T100_TYPE_PASSIVE_STYLUS:
 			tool = MT_TOOL_PEN;
+			distance = MXT_DISTANCE_ACTIVE_TOUCH;
+			hover = false;
 
 			/*
 			 * Passive stylus is reported with size zero so
@@ -1112,6 +1130,30 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 
 			if (data->t100_aux_ampl)
 				pressure = message[data->t100_aux_ampl];
+
+			break;
+
+		case MXT_T100_TYPE_ACTIVE_STYLUS:
+			/* Report input buttons */
+			input_report_key(input_dev, BTN_STYLUS,
+					 message[6] & MXT_T107_STYLUS_BUTTON0);
+			input_report_key(input_dev, BTN_STYLUS2,
+					 message[6] & MXT_T107_STYLUS_BUTTON1);
+
+			/* stylus in range, but position unavailable */
+			if (!(message[6] & MXT_T107_STYLUS_HOVER))
+				break;
+
+			tool = MT_TOOL_PEN;
+			distance = MXT_DISTANCE_ACTIVE_TOUCH;
+			major = MXT_TOUCH_MAJOR_DEFAULT;
+
+			if (!(message[6] & MXT_T107_STYLUS_TIPSWITCH)) {
+				hover = true;
+				distance = MXT_DISTANCE_HOVERING;
+			} else if (data->stylus_aux_pressure) {
+				pressure = message[data->stylus_aux_pressure];
+			}
 
 			break;
 
@@ -1129,7 +1171,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 	 * Values reported should be non-zero if tool is touching the
 	 * device
 	 */
-	if (!pressure && type != MXT_T100_TYPE_HOVERING_FINGER)
+	if (!pressure && !hover)
 		pressure = MXT_PRESSURE_DEFAULT;
 
 	input_mt_slot(input_dev, id);
@@ -1805,7 +1847,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		if (config_crc == 0 || data->config_crc == 0) {
 			dev_info(dev, "CRC zero, attempting to apply config\n");
 		} else if (config_crc == data->config_crc) {
-			dev_dbg(dev, "Config CRC 0x%06X: OK\n",
+			dev_info(dev, "Config CRC 0x%06X: OK. No update required./n",
 				 data->config_crc);
 			return 0;
 		} else {
@@ -2542,6 +2584,7 @@ static int mxt_initialize(struct mxt_data *data)
 	if (error)
 		return error;
 
+	/* Only works when driver compiled as module */
 	error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
 					&client->dev, GFP_KERNEL, data,
 					mxt_config_cb);
@@ -2571,7 +2614,7 @@ static int mxt_set_t7_power_cfg(struct mxt_data *data, u8 sleep)
 	if (error)
 		return error;
 
-	dev_dbg(dev, "Set T7 ACTV:%d IDLE:%d\n",
+	dev_dbg(dev, "Set T7 ACTV:%d IDLE:%d\n",	
 		new_config->active, new_config->idle);
 
 	return 0;
@@ -3039,15 +3082,18 @@ static int mxt_configure_objects(struct mxt_data *data,
 		if (error)
 			dev_warn(dev, "Error %d updating config\n", error);
 	}
+	
+	if (!data->updating_config) {
 
-	if (data->multitouch) {
-		error = mxt_initialize_input_device(data);
-		if (error)
-			return error;
-	} else {
-		dev_warn(dev, "No touch object detected\n");
+		if (data->multitouch) {
+			error = mxt_initialize_input_device(data);
+			if (error)
+				return error;
+		} else {
+			dev_warn(dev, "No touch object detected\n");
+		}
 	}
-
+	
 	mxt_debug_init(data);
 
 	return 0;
@@ -3328,6 +3374,44 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	return count;
 }
 
+static ssize_t mxt_update_cfg_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	const struct firmware *cfg;
+	int ret;
+
+	ret = request_firmware(&cfg, MXT_CFG_NAME, dev);
+	if (ret < 0) {
+		dev_err(dev, "Failure to request config file %s\n",
+			MXT_CFG_NAME);
+		ret = -ENOENT;
+		goto out;
+	} else {
+		dev_info(dev, "Found configuration file: %s\n",
+			MXT_CFG_NAME);
+	}
+	
+	data->updating_config = true;
+
+	if (data->suspend_mode == MXT_SUSPEND_DEEP_SLEEP) {
+		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
+	}
+
+	ret = mxt_configure_objects(data, cfg);
+	if (ret)
+		goto release;
+
+	ret = count;
+
+release:
+	release_firmware(cfg);
+out:
+	data->updating_config = false;
+	return ret;
+}
+
 static ssize_t mxt_debug_enable_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -3439,6 +3523,7 @@ static ssize_t mxt_mem_access_write(struct file *filp, struct kobject *kobj,
 static DEVICE_ATTR(fw_version, S_IRUGO, mxt_fw_version_show, NULL);
 static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
 static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
+static DEVICE_ATTR(update_cfg, S_IWUSR, NULL, mxt_update_cfg_store);
 static DEVICE_ATTR(config_crc, S_IRUGO, mxt_config_crc_show, NULL);
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, mxt_update_fw_store);
 static DEVICE_ATTR(debug_enable, S_IWUSR | S_IRUSR, mxt_debug_enable_show,
@@ -3451,6 +3536,7 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
 	&dev_attr_object.attr,
+	&dev_attr_update_cfg.attr,
 	&dev_attr_config_crc.attr,
 	&dev_attr_update_fw.attr,
 	&dev_attr_debug_enable.attr,
@@ -3674,7 +3760,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		dev_err(&client->dev, "Failed to get reset gpio: %d\n", error);
 		return error;
 	} else {
-		dev_info(&client->dev, "Got Reset GPIO\n");
+		dev_dbg(&client->dev, "Got Reset GPIO\n");
 	  }
 
 	error = devm_request_threaded_irq(&client->dev, client->irq,
@@ -3689,7 +3775,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	if(!(IS_ERR(data->reset_gpio))) {
 		gpiod_direction_output(data->reset_gpio, 1);	/* GPIO in device tree is active-low */
-		dev_info(&client->dev, "Direction is ouput\n");
+		dev_dbg(&client->dev, "Direction is ouput\n");
 	}
 	
 	if(!(IS_ERR(data->reset_gpio))) {

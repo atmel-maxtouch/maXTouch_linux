@@ -56,6 +56,7 @@
 #define MXT_GEN_ACQUIRE_T8		8
 #define MXT_GEN_DATASOURCE_T53		53
 #define MXT_TOUCH_MULTI_T9		9
+#define MXT_PROCI_KEYTHRESHOLD_T14	14
 #define MXT_TOUCH_KEYARRAY_T15		15
 #define MXT_TOUCH_PROXIMITY_T23		23
 #define MXT_TOUCH_PROXKEY_T52		52
@@ -162,6 +163,7 @@ struct t37_debug {
 #define MXT_BOOT_VALUE		0xa5
 #define MXT_RESET_VALUE		0x01
 #define MXT_BACKUP_VALUE	0x55
+#define MXT_BACKUP_W_STOP	0x33
 
 /* Define for MXT_PROCI_TOUCHSUPPRESSION_T42 */
 #define MXT_T42_MSG_TCHSUP	BIT(0)
@@ -362,6 +364,7 @@ struct mxt_data {
 	u8 T6_reportid;
 	u16 T6_address;
 	u16 T7_address;
+	u16 T14_address;
 	u16 T71_address;
 	u8 T9_reportid_min;
 	u8 T9_reportid_max;
@@ -426,6 +429,7 @@ static bool mxt_object_readable(unsigned int type)
 	case MXT_GEN_ACQUIRE_T8:
 	case MXT_GEN_DATASOURCE_T53:
 	case MXT_TOUCH_MULTI_T9:
+	case MXT_PROCI_KEYTHRESHOLD_T14:
 	case MXT_TOUCH_KEYARRAY_T15:
 	case MXT_TOUCH_PROXIMITY_T23:
 	case MXT_TOUCH_PROXKEY_T52:
@@ -1847,7 +1851,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		if (config_crc == 0 || data->config_crc == 0) {
 			dev_info(dev, "CRC zero, attempting to apply config\n");
 		} else if (config_crc == data->config_crc) {
-			dev_info(dev, "Config CRC 0x%06X: OK. No update required./n",
+			dev_info(dev, "Config CRC 0x%06X: OK. No update required.\n",
 				 data->config_crc);
 			return 0;
 		} else {
@@ -1859,6 +1863,10 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 			 "Warning: Info CRC error - device=0x%06X file=0x%06X\n",
 			 data->info_crc, info_crc);
 	}
+
+	/* Stop T70 Dynamic Configuration before calculation of CRC */
+
+	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_W_STOP);
 
 	/* Malloc memory to store configuration */
 	cfg.start_ofs = MXT_OBJECT_START +
@@ -1875,8 +1883,12 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	if (ret)
 		goto release_mem;
 
+
 	/* Calculate crc of the received configs (not the raw config file) */
-	if (data->T71_address)
+	
+	if (data->T14_address)
+		crc_start = data->T14_address;
+	else if (data->T71_address)
 		crc_start = data->T71_address;
 	else if (data->T7_address)
 		crc_start = data->T7_address;
@@ -1939,6 +1951,7 @@ static void mxt_free_object_table(struct mxt_data *data)
 	data->T5_msg_size = 0;
 	data->T6_reportid = 0;
 	data->T7_address = 0;
+	data->T14_address = 0;
 	data->T71_address = 0;
 	data->T9_reportid_min = 0;
 	data->T9_reportid_max = 0;
@@ -2014,6 +2027,9 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			break;
 		case MXT_GEN_POWER_T7:
 			data->T7_address = object->start_address;
+			break;
+		case MXT_PROCI_KEYTHRESHOLD_T14:
+			data->T14_address = object->start_address;
 			break;
 		case MXT_SPT_DYNAMICCONFIGURATIONCONTAINER_T71:
 			data->T71_address = object->start_address;

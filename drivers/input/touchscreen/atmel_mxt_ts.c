@@ -1283,6 +1283,7 @@ static void mxt_proc_t93_messages(struct mxt_data *data, u8 *msg)
 static int mxt_proc_message(struct mxt_data *data, u8 *message)
 {
 	u8 report_id = message[0];
+	bool dump = data->debug_enabled;
 
 	if (report_id == MXT_RPTID_NOMSG)
 		return 0;
@@ -1319,6 +1320,9 @@ static int mxt_proc_message(struct mxt_data *data, u8 *message)
 	} else {
 		mxt_dump_message(data, message);
 	}
+
+	if (dump)
+		mxt_dump_message(data, message);
 
 	if (data->debug_v2_enabled)
 		mxt_debug_msg_add(data, message);
@@ -3816,6 +3820,8 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	error = mxt_debug_msg_init(data);
 	if (error)
 		return error;
+
+	mutex_init(&data->debug_msg_lock);
 
 	return 0;
 

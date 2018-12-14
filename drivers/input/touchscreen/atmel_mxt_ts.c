@@ -1,5 +1,3 @@
-#define DEBUG
-
 /*
  * Atmel maXTouch Touchscreen driver
  *

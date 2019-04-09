@@ -458,7 +458,7 @@ struct mxt_data {
 	enum mxt_suspend_mode suspend_mode;
 
 	/* Indicates whether device is updating configuration */
-	bool updating_config;
+	bool sysfs_updating_config;
 
 };
 
@@ -2919,11 +2919,11 @@ static int mxt_initialize(struct mxt_data *data)
 		mxt_send_bootloader_cmd(data, false);
 		msleep(MXT_FW_RESET_TIME);
 	}
-
+	
 	error = mxt_acquire_irq(data);
 	if (error)
 		return error;
-
+	
 	/* Only works when driver compiled as module */
 	error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
 					&client->dev, GFP_KERNEL, data,
@@ -3423,9 +3423,9 @@ static int mxt_configure_objects(struct mxt_data *data,
 			dev_warn(dev, "Error %d updating config\n", error);
 	}
 	
-	if (!data->updating_config) {
-
+	if (!data->sysfs_updating_config){
 		if (data->multitouch) {
+			dev_info(dev, "Registering devices\n");
 			error = mxt_initialize_input_device(data);
 			if (error)
 				return error;
@@ -3439,6 +3439,8 @@ static int mxt_configure_objects(struct mxt_data *data,
 			dev_warn(dev, "No touch object detected\n");
 		}
 	}
+	
+	data->sysfs_updating_config = false;
 	
 	mxt_debug_init(data);
 
@@ -3703,8 +3705,14 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 					const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
+	struct input_dev *input_dev_sec = data->input_dev_sec;
 	int error;
-
+	
+	/* Unregister secondary device, if present */
+	if (data->input_dev_sec) {
+		input_unregister_device(input_dev_sec);
+	}
+	
 	error = mxt_load_fw(dev, MXT_FW_NAME);
 	if (error) {
 		dev_err(dev, "The firmware update failed(%d)\n", error);
@@ -3714,7 +3722,7 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 
 		error = mxt_initialize(data);
 		if (error)
-			return error;
+			return error;	
 	}
 
 	return count;
@@ -3739,7 +3747,7 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 			MXT_CFG_NAME);
 	}
 	
-	data->updating_config = true;
+	data->sysfs_updating_config = true;
 
 	if (data->suspend_mode == MXT_SUSPEND_DEEP_SLEEP) {
 		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
@@ -3754,7 +3762,6 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 release:
 	release_firmware(cfg);
 out:
-	data->updating_config = false;
 	return ret;
 }
 

@@ -247,6 +247,7 @@ enum t100_type {
 #define MXT_RESET_TIME		200	/* msec */
 #define MXT_RESET_TIMEOUT	3000	/* msec */
 #define MXT_CRC_TIMEOUT		1000	/* msec */
+#define MXT_FW_FLASH_TIME	1000	/* msec */
 #define MXT_FW_RESET_TIME	3000	/* msec */
 #define MXT_FW_CHG_TIMEOUT	300	/* msec */
 #define MXT_BOOTLOADER_WAIT	3000	/* msec */
@@ -458,7 +459,7 @@ struct mxt_data {
 	enum mxt_suspend_mode suspend_mode;
 
 	/* Indicates whether device is updating configuration */
-	bool updating_config;
+	bool sysfs_updating_config;
 
 };
 
@@ -3423,14 +3424,14 @@ static int mxt_configure_objects(struct mxt_data *data,
 			dev_warn(dev, "Error %d updating config\n", error);
 	}
 	
-	if (!data->updating_config) {
-
+	if (!data->sysfs_updating_config) {
 		if (data->multitouch) {
+			dev_info(dev, "Registering devices\n");
 			error = mxt_initialize_input_device(data);
 			if (error)
 				return error;
 			
-			if (data->T100_instances > 1){
+			if (data->T100_instances > 1) {
 			    error = mxt_init_secondary_input(data);
 			    if (error)
 				    dev_warn(dev, "Error %d registering secondary device\n", error);
@@ -3439,6 +3440,8 @@ static int mxt_configure_objects(struct mxt_data *data,
 			dev_warn(dev, "No touch object detected\n");
 		}
 	}
+	
+	data->sysfs_updating_config = false;
 	
 	mxt_debug_init(data);
 
@@ -3583,7 +3586,6 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	if (ret) {
 		goto release_firmware;
 	} else {
-
 		dev_info(dev, "File format is okay\n");		
 	}
 
@@ -3608,9 +3610,6 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 		} else {
 			dev_info(dev, "Found bootloader I2C address\n");
 		}	
-
-		mxt_free_input_device(data);
-		mxt_free_object_table(data);
 	} else {
 		enable_irq(data->irq);
 	}
@@ -3704,19 +3703,34 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 	int error;
-
+	
 	error = mxt_load_fw(dev, MXT_FW_NAME);
 	if (error) {
 		dev_err(dev, "The firmware update failed(%d)\n", error);
 		count = error;
 	} else {
 		dev_info(dev, "The firmware update succeeded\n");
-
-		error = mxt_initialize(data);
-		if (error)
-			return error;
 	}
-
+	
+	data->sysfs_updating_config = true;		
+	
+	msleep(MXT_FW_FLASH_TIME);
+	
+	error = mxt_acquire_irq(data);
+	if (error)
+		return error;
+	
+	/* Only works when driver compiled as module */
+	error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
+					dev, GFP_KERNEL, data,
+					mxt_config_cb);
+	if (error) {
+		dev_err(dev, "Failed to invoke firmware loader: %d\n",
+			error);
+		return error;
+		
+	}
+	
 	return count;
 }
 
@@ -3739,7 +3753,7 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 			MXT_CFG_NAME);
 	}
 	
-	data->updating_config = true;
+	data->sysfs_updating_config = true;
 
 	if (data->suspend_mode == MXT_SUSPEND_DEEP_SLEEP) {
 		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
@@ -3754,7 +3768,6 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 release:
 	release_firmware(cfg);
 out:
-	data->updating_config = false;
 	return ret;
 }
 

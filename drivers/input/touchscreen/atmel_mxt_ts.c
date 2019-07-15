@@ -1495,7 +1495,7 @@ static irqreturn_t mxt_process_messages_t44(struct mxt_data *data)
 		data->T5_msg_size + 1, data->msg_buf);
 	if (ret) {
 		dev_err(dev, "Failed to read T44 and T5 (%d)\n", ret);
-		return IRQ_NONE;
+		return IRQ_HANDLED;
 	}
 
 	count = data->msg_buf[0];
@@ -1504,8 +1504,10 @@ static irqreturn_t mxt_process_messages_t44(struct mxt_data *data)
 	 * This condition may be caused by the CHG line being configured in
 	 * Mode 0. It results in unnecessary I2C operations but it is benign.
 	 */
-	if (count == 0)
-		return IRQ_NONE;
+	if (count == 0) {
+	  	dev_dbg(dev, "Interrupt occurred but no message\n");
+	  	return IRQ_HANDLED;
+	}
 
 	if (count > data->max_reportid) {
 		dev_warn(dev, "T44 count %d exceeded max report id\n", count);
@@ -1516,7 +1518,7 @@ static irqreturn_t mxt_process_messages_t44(struct mxt_data *data)
 	ret = mxt_proc_message(data, data->msg_buf + 1);
 	if (ret < 0) {
 		dev_warn(dev, "Unexpected invalid message\n");
-		return IRQ_NONE;
+		return IRQ_HANDLED;
 	}
 
 	num_left = count - 1;
@@ -1575,6 +1577,7 @@ static int mxt_process_messages_until_invalid(struct mxt_data *data)
 
 static irqreturn_t mxt_process_messages(struct mxt_data *data)
 {
+	struct device *dev = &data->client->dev;
 	int total_handled, num_handled;
 	u8 count = data->last_message_count;
 
@@ -1583,8 +1586,11 @@ static irqreturn_t mxt_process_messages(struct mxt_data *data)
 
 	/* include final invalid message */
 	total_handled = mxt_read_and_process_messages(data, count + 1);
-	if (total_handled < 0)
-		return IRQ_NONE;
+	if (total_handled < 0) {
+	        dev_dbg(dev, "Interrupt occurred but no message\n");
+		return IRQ_HANDLED;
+	}
+
 	/* if there were invalid messages, then we are done */
 	else if (total_handled <= count)
 		goto update_count;
@@ -1592,8 +1598,10 @@ static irqreturn_t mxt_process_messages(struct mxt_data *data)
 	/* keep reading two msgs until one is invalid or reportid limit */
 	do {
 		num_handled = mxt_read_and_process_messages(data, 2);
-		if (num_handled < 0)
-			return IRQ_NONE;
+		if (num_handled < 0) {
+			dev_dbg(dev, "Interrupt occurred but no message\n");
+			return IRQ_HANDLED;
+		}
 
 		total_handled += num_handled;
 

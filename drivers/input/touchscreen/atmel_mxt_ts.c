@@ -26,6 +26,7 @@
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
+#include <linux/irq.h>
 #include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/gpio/consumer.h>
@@ -162,6 +163,7 @@ struct t9_range {
 /* MXT_SPT_COMMSCONFIG_T18 */
 #define MXT_COMMS_CTRL		0
 #define MXT_COMMS_CMD		1
+#define MXT_COMMS_RETRIGEN	BIT(6)
 
 /* MXT_DEBUG_DIAGNOSTIC_T37 */
 #define MXT_DIAGNOSTIC_PAGEUP	0x01
@@ -1494,7 +1496,7 @@ static irqreturn_t mxt_process_messages_t44(struct mxt_data *data)
 	ret = __mxt_read_reg(data->client, data->T44_address,
 		data->T5_msg_size + 1, data->msg_buf);
 	if (ret) {
-		dev_err(dev, "Failed to read T44 and T5 (%d)\n", ret);
+		dev_dbg(dev, "Failed to read T44 and T5 (%d)\n", ret);
 		return IRQ_HANDLED;
 	}
 
@@ -1775,6 +1777,46 @@ static u32 mxt_calculate_crc(u8 *base, off_t start_off, off_t end_off)
 	return crc;
 }
 
+static int mxt_check_retrigen(struct mxt_data *data)
+{
+
+	struct i2c_client *client = data->client;
+	int error;
+	int val;
+	int buff;
+	
+	/*Iqnore when using level triggered mode */
+	if (irq_get_trigger_type(data->irq) & IRQF_TRIGGER_LOW) {
+		dev_info(&client->dev, "Level triggered\n");
+	    return 0;
+	}
+
+	if (data->T18_address) {
+	    error = __mxt_read_reg(client,
+			   data->T18_address + MXT_COMMS_CTRL,
+			   1, &val);
+	    if (error)
+		   return error;
+
+	    if (val & MXT_COMMS_RETRIGEN) {
+		   dev_info(&client->dev, "RETRIGEN enabled\n");
+		   return 0;
+		}
+	}
+
+	dev_info(&client->dev, "Enabling RETRIGEN feature\n");
+
+	buff = val | MXT_COMMS_RETRIGEN;
+	
+	error = __mxt_write_reg(client,
+		        data->T18_address + MXT_COMMS_CTRL,
+			    1, &buff);
+	if (error)
+	   return error;
+	
+	return 0;
+}
+
 static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 {
 	struct device *dev = &data->client->dev;
@@ -1925,7 +1967,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 {
 	struct device *dev = &data->client->dev;
 	struct mxt_cfg cfg;
-	int ret;
+	int ret, error;
 	int offset;
 	int i;
 	u32 info_crc, config_crc, calculated_crc;
@@ -2003,6 +2045,11 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		} else if (config_crc == data->config_crc) {
 			dev_info(dev, "Config CRC 0x%06X: OK. No update required.\n",
 				 data->config_crc);
+			
+			error = mxt_check_retrigen(data);
+			if (error)
+				dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
+		
 			return 0;
 		} else {
 			dev_info(dev, "Config CRC 0x%06X: does not match file 0x%06X\n",
@@ -2069,6 +2116,13 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	/* T7 config may have changed */
 	mxt_init_t7_power_cfg(data);
+	
+	error = mxt_check_retrigen(data);
+	
+	if (error) {
+		dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
+		goto release_mem;
+	}
 
 release_raw:
 	kfree(cfg.raw);
@@ -2938,10 +2992,13 @@ static int mxt_initialize(struct mxt_data *data)
 					&client->dev, GFP_KERNEL, data,
 					mxt_config_cb);
 	if (error) {
-		dev_err(&client->dev, "Failed to invoke firmware loader: %d\n",
+		dev_warn(&client->dev, "Failed to invoke firmware loader: %d\n",
 			error);
-		return error;
 	}
+	
+	error = mxt_check_retrigen(data);
+	if (error) 
+		dev_err(&client->dev, "RETRIGEN Not Enabled or unavailable\n");
 
 	return 0;
 }
@@ -3432,6 +3489,11 @@ static int mxt_configure_objects(struct mxt_data *data,
 			dev_warn(dev, "Error %d updating config\n", error);
 	}
 	
+	error = mxt_check_retrigen(data);
+	if (error) {
+		dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
+	}
+	
 	if (!data->sysfs_updating_config) {
 		if (data->multitouch) {
 			dev_info(dev, "Registering devices\n");
@@ -3733,11 +3795,14 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 					dev, GFP_KERNEL, data,
 					mxt_config_cb);
 	if (error) {
-		dev_err(dev, "Failed to invoke firmware loader: %d\n",
+		dev_warn(dev, "Failed to invoke firmware loader: %d\n",
 			error);
 		return error;
-		
 	}
+	
+	error = mxt_check_retrigen(data);
+	if (error) 
+		dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
 	
 	return count;
 }

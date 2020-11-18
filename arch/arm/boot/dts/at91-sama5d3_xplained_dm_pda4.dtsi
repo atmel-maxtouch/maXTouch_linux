@@ -74,7 +74,7 @@
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */
 					pinctrl-names = "default";
-					pinctrl-0 = <&pinctrl_mxt_ts>;
+					pinctrl-0 = <&pinctrl_mxt_irq &pinctrl_mxt_rst>;
 				};
 
 			};
@@ -108,9 +108,14 @@
 							<AT91_PIOE 8 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
 					};
 
-					pinctrl_mxt_ts: mxt_irq {
+					pinctrl_mxt_irq: mxt_irq {
 						atmel,pins =
 							<AT91_PIOE 7 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
+					};
+
+					pinctrl_mxt_rst: mxt_rst {
+						atmel,pins =
+							<AT91_PIOE 6 AT91_PERIPH_GPIO AT91_PINCTRL_DEGLITCH>;
 					};
 				};
 			};

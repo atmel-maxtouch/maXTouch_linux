@@ -59,6 +59,9 @@
 #define MXT_GEN_POWER_T7		7
 #define MXT_GEN_ACQUIRE_T8		8
 #define MXT_TOUCH_MULTI_T9		9
+#define MXT_SPT_SELFTESTCONTROL_T10	10
+#define MXT_SPT_SELFTESTPINFAULT_T11	11
+#define MXT_SPT_SELFTESTSIGLIMIT_T12	12
 #define MXT_PROCI_KEYTHRESHOLD_T14	14
 #define MXT_TOUCH_KEYARRAY_T15		15
 #define MXT_SPT_COMMSCONFIG_T18		18
@@ -428,7 +431,7 @@ struct mxt_data {
 	u8 T19_reportid_min;
 	u8 T24_reportid_min;
 	u8 T24_reportid_max;
-	u8 T25_address;
+	u16 T25_address;
 	u8 T25_reportid_min;
 	u8 T27_reportid_min;
 	u8 T27_reportid_max;
@@ -518,6 +521,9 @@ static bool mxt_object_readable(unsigned int type)
 	case MXT_GEN_ACQUIRE_T8:
 	case MXT_GEN_DATASOURCE_T53:
 	case MXT_TOUCH_MULTI_T9:
+	case MXT_SPT_SELFTESTCONTROL_T10:
+	case MXT_SPT_SELFTESTPINFAULT_T11:
+	case MXT_SPT_SELFTESTSIGLIMIT_T12:
 	case MXT_TOUCH_KEYARRAY_T15:
 	case MXT_TOUCH_PROXIMITY_T23:
 	case MXT_TOUCH_PROXKEY_T52:
@@ -4182,11 +4188,12 @@ static ssize_t mxt_show_instance(char *buf, int count,
 
 	if (mxt_obj_instances(object) > 1)
 		count += scnprintf(buf + count, PAGE_SIZE - count,
-				   "Instance %u\n", instance);
+				   "Inst: %u\n", instance);
 
 	for (i = 0; i < mxt_obj_size(object); i++)
 		count += scnprintf(buf + count, PAGE_SIZE - count,
-				"\t[%2u]: %02x (%d)\n", i, val[i], val[i]);
+				"%02x ",val[i]);
+
 	count += scnprintf(buf + count, PAGE_SIZE - count, "\n");
 
 	return count;
@@ -4209,6 +4216,7 @@ static ssize_t mxt_object_show(struct device *dev,
 
 	error = 0;
 	for (i = 0; i < data->info->object_num; i++) {
+
 		object = data->object_table + i;
 
 		if (!mxt_object_readable(object->type))
@@ -4221,7 +4229,11 @@ static ssize_t mxt_object_show(struct device *dev,
 			u16 size = mxt_obj_size(object);
 			u16 addr = object->start_address + j * size;
 
-			error = __mxt_read_reg(data->client, addr, size, obuf);
+			if (data->crc_enabled)
+				error = __mxt_read_reg_crc(data->client, addr, size, obuf, data, false);
+			else 
+				error = __mxt_read_reg(data->client, addr, size, obuf);
+
 			if (error)
 				goto done;
 

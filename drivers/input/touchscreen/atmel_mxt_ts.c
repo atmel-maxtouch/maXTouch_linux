@@ -490,6 +490,7 @@ struct mxt_data {
 	/* for config_fw updates, power up, irq handling */
 	bool irq_processing;
 	bool system_power_up;
+	u8 comms_failure_count;
 	volatile bool sysfs_updating_config_fw;
 
 	/* Debugfs variables */
@@ -715,16 +716,22 @@ static int mxt_wait_for_completion(struct mxt_data *data,
 }
 
 
-static u8 mxt_update_seq_num(struct mxt_data *data, bool reset_counter)
+static u8 mxt_update_seq_num(struct mxt_data *data, bool reset_counter, u8 counter_value)
 {
 	u8 current_val;
 
 	current_val = data->msg_num.txseq_num;
 
-	if (data->msg_num.txseq_num == 0xFF || reset_counter) {
-		data->msg_num.txseq_num = 0;
+	if (reset_counter) {
+		if (counter_value > 0)
+			data->msg_num.txseq_num = counter_value;
+		else
+			data->msg_num.txseq_num = 0;
 	} else {
-		data->msg_num.txseq_num++;
+		if (data->msg_num.txseq_num == 0xFF)
+			data->msg_num.txseq_num = 0;
+		else
+			data->msg_num.txseq_num++;
 	}
 
 	return current_val;
@@ -1014,17 +1021,16 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 	u8 crc_data = 0;
 	char *ptr_data;
 
-	//Set address pointer
 	count = 4;	//16bit addr, tx_seq_num, 8bit crc
 
 	buf = kmalloc(count, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	if ((crc8 || data->crc_enabled) && !data->skip_crc_write) {
+	if (crc8 && data->crc_enabled) {
 		buf[0] = reg & 0xff;
 		buf[1] = ((reg >> 8) & 0xff);
-		buf[2] = mxt_update_seq_num(data, false);
+		buf[2] = mxt_update_seq_num(data, false, 0x00);
 
 		for (i = 0; i < (count-1); i++) {
 			crc_data = __mxt_calc_crc8(crc_data, buf[i]);
@@ -1035,14 +1041,15 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 		ret = i2c_master_send(client, buf, count);
 
 		if (ret == count) {
-		ret = 0;
+			ret = 0;
 		} else {
-			if (ret >= 0)
-				ret = -EIO;
+			ret = -EIO;
 
 			dev_err(&client->dev, "%s: i2c send failed (%d)\n",
 				__func__, ret);
-		}	
+			mxt_update_seq_num(data, true, buf[2]);
+			goto end_reg_read;
+		}
 	}
 
 	//Read data and check 8bit CRC
@@ -1067,16 +1074,16 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 		}
 		ret = 0;
 	} else {
-		if (ret >= 0)
 			ret = -EIO;
 
-		dev_err(&client->dev, "%s: i2c receive failed (%d)\n",
-			__func__, ret);
+			dev_err(&client->dev, "%s: i2c receive failed (%d)\n",
+				__func__, ret);
 	}
+
+end_reg_read:
 
 	kfree(buf);
 	return ret;
-	
 }
 
 static int __mxt_write_reg(struct i2c_client *client, u16 reg, u16 len,
@@ -1153,11 +1160,11 @@ static int __mxt_write_reg_crc(struct i2c_client *client, u16 reg, u16 length,
 
 		msgbuf[0] = write_addr & 0xff;
 		msgbuf[1] = (write_addr >> 8) & 0xff;
-		msgbuf[msg_count-2] = mxt_update_seq_num(data, false);
+		msgbuf[msg_count-2] = mxt_update_seq_num(data, false, 0x00);
 
 		j = 0;
 
-		while (j < message_length){
+		while (j < message_length) {
 			//Copy current messasge into msgbuffer
 			msgbuf[2 + j] = databuf[bytesWritten + j];	
 			j++; 
@@ -1189,10 +1196,11 @@ static int __mxt_write_reg_crc(struct i2c_client *client, u16 reg, u16 length,
 				msg_count = message_length + 4;
 			}
 		} else {
-			if (ret >= 0)
 				ret = -EIO;
-			dev_err(&client->dev, "%s: i2c send failed (%d)\n",
-				__func__, ret);
+				dev_err(&client->dev, "%s: i2c send failed (%d)\n",
+					__func__, ret);
+
+				mxt_update_seq_num(data, true, msgbuf[msg_count-2]);
 		}
 
 		retry_counter++;
@@ -1243,11 +1251,14 @@ static struct mxt_object *mxt_get_object(struct mxt_data *data, u8 type)
 	return NULL;
 }
 
+static int mxt_resync_comm(struct mxt_data *data);
+
 static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 {
 	struct device *dev = &data->client->dev;
 	u8 status = msg[1];
 	u32 crc = msg[2] | (msg[3] << 8) | (msg[4] << 16);
+	int ret;
 
 	if (crc != data->config_crc) {
 		data->config_crc = crc;
@@ -1271,6 +1282,21 @@ static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 			status & MXT_T6_STATUS_CAL ? " CAL" : "",
 			status & MXT_T6_STATUS_CFGERR ? " CFGERR" : "",
 			status & MXT_T6_STATUS_COMSERR ? " COMSERR" : "");
+
+	if (status & MXT_T6_STATUS_COMSERR) {
+
+		data->comms_failure_count++;
+
+		if (data->comms_failure_count == 0x05) {
+			ret = mxt_resync_comm(data);
+			if (ret)
+				dev_dbg(dev, "T6 COMSERR Error\n");
+
+			data->comms_failure_count = 0;
+		}
+	} else {
+		data->comms_failure_count = 0;
+	}
 
 	/* Save current status */
 	data->t6_status = status;
@@ -1716,13 +1742,12 @@ static int mxt_proc_message(struct mxt_data *data, u8 *message)
 	return 1;
 }
 
-static int mxt_read_and_process_messages(struct mxt_data *data, u8 count)
+static int mxt_read_and_process_messages(struct mxt_data *data, u8 count, bool crc8)
 {
 	struct device *dev = &data->client->dev;
 	int ret;
 	int i;
 	u8 num_valid = 0;
-	bool crc_on = true;
 
 	/* Safety check for msg_buf */
 	if (count > data->max_reportid)
@@ -1731,7 +1756,7 @@ static int mxt_read_and_process_messages(struct mxt_data *data, u8 count)
 	for (i=0; i < count; i++) {
 		if (data->crc_enabled){
 			ret = __mxt_read_reg_crc(data->client, data->T5_address,
-				data->T5_msg_size, data->msg_buf, data, crc_on);
+				data->T5_msg_size, data->msg_buf, data, crc8);
 		} else {
 			/* Process remaining messages if necessary */
 			ret = __mxt_read_reg(data->client, data->T5_address, 
@@ -1760,17 +1785,16 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	struct device *dev = &data->client->dev;
 	int ret;
 	u8 count, num_left;
-	bool crc_on = true;
 
 	/* Read T44 and T5 together for legacy devices */
 	/* For new HA parts, read only T144 count */
 
 	if (!(data->crc_enabled)) {
 		ret = __mxt_read_reg(data->client, data->T44_address,
-				data->T5_msg_size + 1, data->msg_buf);
+			data->T5_msg_size + 1, data->msg_buf);
 	} else {
 		ret = __mxt_read_reg_crc(data->client, data->T144_address, 
-			2, data->msg_buf, data, crc_on);
+			2, data->msg_buf, data, true);
 	}	
 	
 	if (ret) {
@@ -1783,7 +1807,7 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	if ((data->crc_enabled) && count > 0){
 		/* Read first T5 message */
 		ret = __mxt_read_reg_crc(data->client, data->T5_address,
-			data->T5_msg_size, data->msg_buf + 1, data, crc_on);
+			data->T5_msg_size, data->msg_buf + 1, data, true);
 	}
 
 	/*
@@ -1797,7 +1821,15 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 
 	if (count > data->max_reportid) {
 		dev_warn(dev, "T44/T144 count %d exceeded max report id\n", count);
-		count = data->max_reportid;
+
+		if (count == 0xa6 && data->crc_enabled == true)
+		{
+			// Try resync
+			// Reovery requires RETRIGEN bit to be enabled
+			ret = mxt_resync_comm(data);
+		}
+		
+		return IRQ_HANDLED;
 	}
 
 	/* Process first message */
@@ -1813,9 +1845,7 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	if (num_left) {
 		dev_dbg(dev, "Remaining messages to process\n");
 
-		data->skip_crc_write = true;
-
-		ret = mxt_read_and_process_messages(data, num_left);
+		ret = mxt_read_and_process_messages(data, num_left, false);
 		if (ret < 0)
 			goto end;
 		else if (ret != num_left) {
@@ -1849,7 +1879,7 @@ static int mxt_process_messages_until_invalid(struct mxt_data *data)
 
 	/* Read messages until we force an invalid */
 	do {
-		read = mxt_read_and_process_messages(data, count);
+		read = mxt_read_and_process_messages(data, count, true);
 		if (read < count)
 			return 0;
 	} while (--tries);
@@ -1878,7 +1908,7 @@ static irqreturn_t mxt_process_messages(struct mxt_data *data)
 		count = 1;
 
 	/* include final invalid message */
-	total_handled = mxt_read_and_process_messages(data, count + 1);
+	total_handled = mxt_read_and_process_messages(data, count + 1, false);
 	if (total_handled < 0) {
 	        dev_dbg(dev, "Interrupt occurred but no message\n");
 		return IRQ_HANDLED;
@@ -1890,7 +1920,7 @@ static irqreturn_t mxt_process_messages(struct mxt_data *data)
 
 	/* keep reading two msgs until one is invalid or reportid limit */
 	do {
-		num_handled = mxt_read_and_process_messages(data, 2);
+		num_handled = mxt_read_and_process_messages(data, 2, false);
 		if (num_handled < 0) {
 			dev_dbg(dev, "Interrupt occurred but no message\n");
 			return IRQ_HANDLED;
@@ -1949,7 +1979,6 @@ static int mxt_t6_command(struct mxt_data *data, u16 cmd_offset,
 	u8 command_register;
 	int timeout_counter = 0;
 	int ret;
-	bool crc_on = false;
 
 	reg = data->T6_address + cmd_offset;
 
@@ -1971,7 +2000,7 @@ static int mxt_t6_command(struct mxt_data *data, u16 cmd_offset,
 		if (!(data->crc_enabled)){
 			ret = __mxt_read_reg(data->client, reg, 1, &command_register);
 		} else {
-			ret = __mxt_read_reg_crc(data->client, reg, 1, &command_register, data, crc_on);
+			ret = __mxt_read_reg_crc(data->client, reg, 1, &command_register, data, true);
 		}
 
 		if (ret)
@@ -2016,7 +2045,7 @@ static int mxt_soft_reset(struct mxt_data *data, bool reset_enabled) {
 		return ret;
 
 	if (reset_enabled)
-		mxt_update_seq_num(data, true);
+		mxt_update_seq_num(data, true, 0x00);
 
 	/* Ignore CHG line after reset */
 	msleep(MXT_RESET_INVALID_CHG);
@@ -2110,7 +2139,7 @@ static int mxt_check_retrigen(struct mxt_data *data)
  		if (data->crc_enabled){
 	    	error = __mxt_read_reg_crc(client,
 			data->T18_address + MXT_COMMS_CTRL,
-			   1, &val, data, false);
+			   1, &val, data, true);
 		} else{
 			error = __mxt_read_reg(client,
 			data->T18_address + MXT_COMMS_CTRL,
@@ -2233,6 +2262,9 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 			if (i > mxt_obj_size(object))
 				continue;
 
+			//Raw file must include all objects to ensure
+			//correct programming of configuration
+
 			byte_offset = reg + i - cfg->start_ofs;
 
 			if (byte_offset >= 0 && byte_offset < cfg->mem_size) {
@@ -2278,7 +2310,7 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 
 			if (data->crc_enabled){
 				//Keep for debug.  msg_buf size caution.
-				error = __mxt_read_reg_crc(data->client, reg, size, data->msg_buf, data, false);
+				error = __mxt_read_reg_crc(data->client, reg, size, data->msg_buf, data, true);
 
 			} else {
 				error = __mxt_read_reg(data->client, reg, size, data->msg_buf);
@@ -2423,7 +2455,10 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_W_STOP);
 
-	cfg.start_ofs = data->T38_address;
+	/* Malloc memory to store configuration */
+	cfg.start_ofs = MXT_OBJECT_START +
+			data->info->object_num * sizeof(struct mxt_object) +
+			MXT_INFO_CHECKSUM_SIZE;
 
 	cfg.mem_size = data->mem_size - cfg.start_ofs;
 
@@ -2433,7 +2468,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		goto release_mem;
 	}
 
-	dev_dbg(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
+	dev_info(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
 		cfg.mem_size, cfg.start_ofs, (long long)cfg.raw_pos, offset);
 
 	/* Prepares and programs configuration */
@@ -2817,6 +2852,171 @@ static int mxt_parse_object_table(struct mxt_data *data,
 	return 0;
 }
 
+static int mxt_resync_comm(struct mxt_data *data)
+{
+
+	struct i2c_client *client = data->client;
+	int error;
+	size_t dev_id_size;
+	void *dev_id_buf, *sbuf;
+	uint8_t num_objects;
+	u32 calculated_crc;
+	u8 *crc_ptr;
+	u16 count = 0;
+	bool insync = false;
+	
+	/* Read 7-byte ID information block starting at address 0 */
+	dev_id_size = sizeof(struct mxt_info);
+
+	dev_id_buf = kzalloc(dev_id_size, GFP_KERNEL);
+
+	if (!dev_id_buf)
+		return -ENOMEM;
+
+	/* Start with TX seq_num 0x00 */
+
+	data->msg_num.txseq_num = 0;
+
+	//Use master send and master receive, 8bit CRC is turned OFF
+	error = __mxt_read_reg_crc(data->client, 0, dev_id_size, dev_id_buf, data, true);
+	if (error)
+		goto err_free_mem;
+	
+	data->info = (struct mxt_info *)dev_id_buf;
+
+	if (data->info->family_id == 0xa6) {
+		/* Resize buffer to give space for rest of info block */
+		num_objects = ((struct mxt_info *)dev_id_buf)->object_num;
+
+		dev_id_size += (num_objects * sizeof(struct mxt_object))
+			+ MXT_INFO_CHECKSUM_SIZE;
+
+		sbuf = krealloc(dev_id_buf, dev_id_size, GFP_KERNEL);
+		if (!sbuf) {
+			error = -ENOMEM;
+			goto err_free_mem;
+		}	
+
+		dev_id_buf = sbuf;
+
+		do {
+
+		/* Read rest of info block, offset 0x07*/
+		error = __mxt_read_reg_crc(client, MXT_OBJECT_START, (dev_id_size - MXT_OBJECT_START), 
+			(dev_id_buf + MXT_OBJECT_START), data, true);
+
+		if (error)
+			goto err_free_mem;
+
+		crc_ptr = dev_id_buf + dev_id_size - MXT_INFO_CHECKSUM_SIZE;
+
+		data->info_crc = crc_ptr[0] | (crc_ptr[1] << 8) | (crc_ptr[2] << 16);
+
+		calculated_crc = mxt_calculate_crc(dev_id_buf, 0, dev_id_size - MXT_INFO_CHECKSUM_SIZE);
+
+		if (data->info_crc == calculated_crc) {
+			dev_info(&client->dev,
+				"Resync is successful: Info Block CRC = %06X\n", data->info_crc);
+			insync = true;
+		} else {
+
+			dev_dbg(&client->dev,
+				"Info Block CRC error calculated=0x%06X read=0x%06X\n",
+				calculated_crc, data->info_crc);
+
+			data->msg_num.txseq_num = 0;
+
+			count ++;
+		}
+
+		} while (insync == false && count < 260);
+
+	} else {
+
+		do {
+
+			data->msg_num.txseq_num = 0;
+
+			/* Re-read first 7 bytes of ID header */
+			error = __mxt_read_reg_crc(client, 0x00, dev_id_size, 
+				dev_id_buf, data, true);
+
+			if (error)
+				goto err_free_mem;
+
+			data->info = (struct mxt_info *)dev_id_buf;
+
+			if (data->info->family_id == 0xA6) {
+				dev_info(&client->dev, "Pass 1: Resync is complete\n");
+
+				num_objects = ((struct mxt_info *)dev_id_buf)->object_num;
+
+				dev_id_size += (num_objects * sizeof(struct mxt_object))
+					+ MXT_INFO_CHECKSUM_SIZE;
+
+				sbuf = krealloc(dev_id_buf, dev_id_size, GFP_KERNEL);
+			
+				if (!sbuf) {
+					error = -ENOMEM;
+					goto err_free_mem;
+				}	
+
+				dev_id_buf = sbuf;
+
+				/* Read rest of info block */
+				error = __mxt_read_reg_crc(client, MXT_OBJECT_START, (dev_id_size - MXT_OBJECT_START), 
+					(dev_id_buf + MXT_OBJECT_START), data, true);
+
+				if (error)
+					goto err_free_mem;
+
+				crc_ptr = dev_id_buf + dev_id_size - MXT_INFO_CHECKSUM_SIZE;
+
+				data->info_crc = crc_ptr[0] | (crc_ptr[1] << 8) | (crc_ptr[2] << 16);
+
+				calculated_crc = mxt_calculate_crc(dev_id_buf, 0, dev_id_size - MXT_INFO_CHECKSUM_SIZE);
+
+				if (data->info_crc == calculated_crc) {
+					dev_info(&client->dev,
+						"Pass 2: Resync is complete: Info Block CRC = %06X\n", data->info_crc);
+					insync = true;
+				}
+			}
+
+			count++;
+
+		} while (insync == false && count < 260);
+	}
+
+	if (insync != true) {
+		error = true;
+		dev_info(&client->dev,"Resync failed\n");
+		goto err_free_mem;
+	}
+
+	data->raw_info_block = dev_id_buf;
+	data->info = (struct mxt_info *)dev_id_buf;
+
+	/* Parse object table information */
+	error = mxt_parse_object_table(data, dev_id_buf + MXT_OBJECT_START);
+	if (error) {	
+		dev_err(&client->dev, "Error %d parsing object table\n", error);
+		mxt_free_object_table(data);
+		goto err_free_mem;
+	}
+
+	data->object_table = (struct mxt_object *)(dev_id_buf + MXT_OBJECT_START);
+
+	kfree(dev_id_buf);
+	
+	return 0;
+
+err_free_mem:
+	kfree(dev_id_buf);
+	
+	return error;
+}
+
 static int mxt_read_info_block(struct mxt_data *data)
 {
 	struct i2c_client *client = data->client;
@@ -2827,7 +3027,6 @@ static int mxt_read_info_block(struct mxt_data *data)
 	u32 calculated_crc;
 	u8 *crc_ptr;
 	u16 info_addr = 0x0000;
-	bool crc_on = false;
 
 	/* If info block already allocated, free it */
 	if (data->raw_info_block)
@@ -2844,7 +3043,7 @@ static int mxt_read_info_block(struct mxt_data *data)
 		return -ENOMEM;
 
 	//Use master send and master receive, 8bit CRC is turned OFF
-	error = __mxt_read_reg_crc(data->client, 0, size, id_buf, data, crc_on);
+	error = __mxt_read_reg_crc(data->client, 0, size, id_buf, data, false);
 	if (error)
 		goto err_free_mem;
 
@@ -2880,7 +3079,8 @@ static int mxt_read_info_block(struct mxt_data *data)
 		goto err_free_mem;
 
 	/* Read rest of info block after id block */
-	error = __mxt_read_reg_crc(client, MXT_OBJECT_START, (size - MXT_OBJECT_START), (id_buf + MXT_OBJECT_START), data, crc_on);
+	error = __mxt_read_reg_crc(client, MXT_OBJECT_START, (size - MXT_OBJECT_START), 
+		(id_buf + MXT_OBJECT_START), data, false);
 
 	if (error)
 		goto err_free_mem;
@@ -3089,7 +3289,7 @@ static int mxt_read_t100_config(struct mxt_data *data, u8 instance)
 			/* read touchscreen dimensions */
 	error = __mxt_read_reg_crc(client,
 			       object->start_address + obj_size + MXT_T100_XRANGE,
-			       sizeof(range_x), &range_x, data, false);
+			       sizeof(range_x), &range_x, data, true);
 	if (error)
 		return error;
 
@@ -3097,7 +3297,7 @@ static int mxt_read_t100_config(struct mxt_data *data, u8 instance)
 
 	error = __mxt_read_reg_crc(client,
 			       object->start_address + obj_size + MXT_T100_YRANGE,
-			       sizeof(range_y), &range_y, data, false);
+			       sizeof(range_y), &range_y, data, true);
 	if (error)
 		return error;
 
@@ -3105,20 +3305,20 @@ static int mxt_read_t100_config(struct mxt_data *data, u8 instance)
 
 	error = __mxt_read_reg_crc(client,
 			       object->start_address + obj_size + MXT_T100_XSIZE,
-			       sizeof(data->xsize), &data->xsize, data, false);
+			       sizeof(data->xsize), &data->xsize, data, true);
 	if (error)
 		return error;
 
 	error = __mxt_read_reg_crc(client,
 			       object->start_address + obj_size + MXT_T100_YSIZE,
-			       sizeof(data->ysize), &data->ysize, data, false);
+			       sizeof(data->ysize), &data->ysize, data, true);
 	if (error)
 		return error;
 
 	/* read orientation config */
 	error =  __mxt_read_reg_crc(client,
 				object->start_address + obj_size + MXT_T100_CFG1,
-				1, &cfg, data, false);
+				1, &cfg, data, true);
 	if (error)
 		return error;
 
@@ -3137,7 +3337,7 @@ static int mxt_read_t100_config(struct mxt_data *data, u8 instance)
 
 		error =  __mxt_read_reg_crc(client,
 				object->start_address + obj_size+ MXT_T100_TCHAUX,
-				1, &tchaux, data, false);
+				1, &tchaux, data, true);
 	}	
 
 	if (error)
@@ -3608,7 +3808,7 @@ recheck:
 				sizeof(data->t7_cfg), &data->t7_cfg);
 	} else {
 		error = __mxt_read_reg_crc(data->client, data->T7_address,
-				sizeof(data->t7_cfg), &data->t7_cfg, data, false);
+				sizeof(data->t7_cfg), &data->t7_cfg, data, true);
 	}
 
 	if (error)
@@ -4432,7 +4632,7 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 
 	msleep(MXT_FW_FLASH_TIME);
 
-	mxt_update_seq_num(data, true);
+	mxt_update_seq_num(data, true, 0x00);
 
 	/* Read infoblock to determine device type */
 	error = mxt_read_info_block(data);
@@ -4486,15 +4686,6 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 	data->sysfs_updating_config_fw = true;
 	data->irq_processing = false;
 
-	error = mxt_clear_cfg(data);
-
-	if (error)
-		dev_err(dev, "Failed clear configuration\n");
-
-	error = mxt_process_messages_until_invalid(data);
-	if (error)
-		dev_err(dev, "Failed process configuration\n");
-
 	ret = request_firmware(&cfg, MXT_CFG_NAME, dev);
 	if (ret < 0) {
 		dev_err(dev, "Failure to request config file %s\n",
@@ -4505,8 +4696,15 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 		dev_info(dev, "Found configuration file: %s\n",
 			MXT_CFG_NAME);
 	}
-	
-	data->irq_processing = false;
+
+	error = mxt_clear_cfg(data);
+
+	if (error)
+		dev_err(dev, "Failed clear configuration\n");
+
+	error = mxt_process_messages_until_invalid(data);
+	if (error)
+		dev_err(dev, "Failed process configuration\n");
 
 	if (data->suspend_mode == MXT_SUSPEND_DEEP_SLEEP) {
 		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
@@ -4647,7 +4845,6 @@ static ssize_t mxt_mem_access_read(struct file *filp, struct kobject *kobj,
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct mxt_data *data = dev_get_drvdata(dev);
 	int ret = 0;
-	int crc_on = false;
 
 	ret = mxt_check_mem_access_params(data, off, &count);
 	if (ret < 0)
@@ -4657,7 +4854,7 @@ static ssize_t mxt_mem_access_read(struct file *filp, struct kobject *kobj,
  		if (!data->crc_enabled){
 	    	ret = __mxt_read_reg(data->client, off, count, buf);
 		} else {
-			ret = __mxt_read_reg_crc(data->client, off, count, buf, data, crc_on);
+			ret = __mxt_read_reg_crc(data->client, off, count, buf, data, true);
 		}
 	}
 

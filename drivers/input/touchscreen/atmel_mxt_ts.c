@@ -2069,7 +2069,7 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 	data->config_crc = 0;
 
 	if((!data->crc_enabled))
-	reinit_completion(&data->crc_completion);
+		reinit_completion(&data->crc_completion);
 
 	mxt_t6_command(data, cmd, value, true);
 
@@ -2077,8 +2077,9 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 	 * Wait for crc message. On failure, CRC is set to 0 and config will
 	 * always be downloaded.
 	 */
+
 	if (!(data->crc_enabled))
-	mxt_wait_for_completion(data, &data->crc_completion, MXT_CRC_TIMEOUT);
+		mxt_wait_for_completion(data, &data->crc_completion, MXT_CRC_TIMEOUT);
 
 }
 
@@ -2371,6 +2372,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	mxt_update_crc(data, MXT_COMMAND_REPORTALL, 1);
 
+	//Clear messages after update in cases /CHG low
 	error = mxt_process_messages_until_invalid(data);
 	if (error)
 		dev_dbg(dev, "Unable to read CRC\n");
@@ -4684,7 +4686,9 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 	int ret, error;
 
 	data->sysfs_updating_config_fw = true;
-	data->irq_processing = false;
+
+	if (data->crc_enabled)
+		data->irq_processing = false;
 
 	ret = request_firmware(&cfg, MXT_CFG_NAME, dev);
 	if (ret < 0) {
@@ -4702,6 +4706,7 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 	if (error)
 		dev_err(dev, "Failed clear configuration\n");
 
+	//Captures messages in buffer left over from clear_cfg()
 	error = mxt_process_messages_until_invalid(data);
 	if (error)
 		dev_err(dev, "Failed process configuration\n");

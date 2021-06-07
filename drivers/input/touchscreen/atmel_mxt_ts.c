@@ -2884,6 +2884,7 @@ static int mxt_resync_comm(struct mxt_data *data)
 	if (error)
 		goto err_free_mem;
 	
+	/* Copy infoblock data to structure */
 	data->info = (struct mxt_info *)dev_id_buf;
 
 	if (data->info->family_id == 0xa6) {
@@ -3009,8 +3010,12 @@ static int mxt_resync_comm(struct mxt_data *data)
 
 	data->object_table = (struct mxt_object *)(dev_id_buf + MXT_OBJECT_START);
 
-	kfree(dev_id_buf);
-	
+	dev_info(&client->dev,
+		 "Family: %u Variant: %u Firmware V%u.%u.%02X Objects: %u\n",
+		 data->info->family_id, data->info->variant_id,
+		 data->info->version >> 4, data->info->version & 0xf,
+		 data->info->build, data->info->object_num);
+
 	return 0;
 
 err_free_mem:

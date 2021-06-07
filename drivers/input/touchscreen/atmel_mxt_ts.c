@@ -2867,6 +2867,9 @@ static int mxt_resync_comm(struct mxt_data *data)
 	u16 count = 0;
 	bool insync = false;
 	
+	if (data->raw_info_block)
+		mxt_free_object_table(data);
+
 	/* Read 7-byte ID information block starting at address 0 */
 	dev_id_size = sizeof(struct mxt_info);
 

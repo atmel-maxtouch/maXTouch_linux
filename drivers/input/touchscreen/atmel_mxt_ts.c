@@ -109,6 +109,7 @@
 #define MXT_PROCI_SELFCAPGRIPSUPPRESSION_T112	   112
 #define MXT_SPT_PROXMEASURECONFIG_T113		   113
 #define MXT_ACTIVESTYLUSMEASCONFIG_T114		   114
+#define MXT_DATACONTAINER_T117					117
 #define MXT_SPT_DATACONTAINERCTRL_T118		   118
 #define MXT_PROCI_HOVERGESTUREPROCESSOR_T129	   129
 #define MXT_SPT_SELCAPVOLTAGEMODE_T133		   133
@@ -354,6 +355,7 @@ struct mxt_cfg {
 	int start_ofs;
 
 	struct mxt_info info;
+	u16 object_skipped_ofs;
 };
 
 /* Security content */
@@ -2179,18 +2181,40 @@ static int mxt_check_retrigen(struct mxt_data *data)
 	return 0;
 }
 
-static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
+static bool mxt_object_is_volatile(struct mxt_data *data, uint16_t object_type)
+{
+ 
+ 	switch (object_type) {
+  	case MXT_GEN_MESSAGE_T5:
+  	case MXT_GEN_COMMAND_T6:
+  	case MXT_DEBUG_DIAGNOSTIC_T37:
+  	case MXT_SPT_MESSAGECOUNT_T44:
+  	case MXT_DATACONTAINER_T117:
+  	case MXT_SPT_MESSAGECOUNT_T144:
+  
+    	return true;
+
+  	default:
+    	return false;
+    }	
+}
+
+static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 {
 	struct device *dev = &data->client->dev;
 	struct mxt_object *object;
 	unsigned int type, instance, size, byte_offset = 0;
-	int offset, write_offset = 0, read_offset = 0;
+	int offset, write_offset = 0;
 	int totalBytesToWrite = 0;
+	unsigned int first_obj_type = 0;
+	unsigned int first_obj_addr = 0;
 	int ret, i, error;
-	int byte_count = 0;
 	u16 reg;
 	u8 val;
 
+	cfg->object_skipped_ofs = 0;
+
+	/* Loop until end of raw file */
 	while (cfg->raw_pos < cfg->raw_size) {
 		/* Read type, instance, length */
 		ret = sscanf(cfg->raw + cfg->raw_pos, "%x %x %x%n",
@@ -2202,11 +2226,33 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 			dev_err(dev, "Bad format: failed to parse object\n");
 			return -EINVAL;
 		}
+		/* Update position in raw file to start of obj data */
 		cfg->raw_pos += offset;
 
 		object = mxt_get_object(data, type);
-		if (!object) {
-			/* Skip object */
+
+		/* Find first object in cfg file; if not first in device */
+		if (first_obj_type == 0) {
+			first_obj_type = type;
+			first_obj_addr = object->start_address;
+
+			dev_info(dev, "First object found T[%d]\n", type);
+
+			if (first_obj_addr > cfg->start_ofs) {
+				cfg->object_skipped_ofs = first_obj_addr - cfg->start_ofs;
+
+				dev_dbg(dev, "cfg->object_skipped_ofs %d, first_obj_addr %d, cfg->start_ofs %d\n", 
+					cfg->object_skipped_ofs, first_obj_addr, cfg->start_ofs);
+
+				cfg->mem_size = cfg->mem_size - cfg->object_skipped_ofs;
+			}
+		}
+
+		if(!object || (mxt_object_is_volatile(data, type))) {
+			/* Skip object if not present in device or volatile */
+
+			dev_info(dev, "Skipping object T[%d] Instance %d\n", type, instance);
+
 			for (i = 0; i < size; i++) {
 				ret = sscanf(cfg->raw + cfg->raw_pos, "%hhx%n",
 					     &val, &offset);
@@ -2215,7 +2261,17 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 						type, i);
 					return -EINVAL;
 				}
+				/*Update position in raw file to next obj */
 				cfg->raw_pos += offset;
+
+				/* Adjust byte_offset for skipped objects */
+				cfg->object_skipped_ofs = cfg->object_skipped_ofs + 1;;
+
+				/* Adjust config memory size, less to program */
+				/* Only for non-volatile T objects */
+				cfg->mem_size--;
+				dev_dbg(dev, "cfg->mem_size [%d]\n", cfg->mem_size);
+
 			}
 			continue;
 		}
@@ -2258,20 +2314,18 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 					type, i);
 				return -EINVAL;
 			}
+			/* Update position in raw file to next byte */
 			cfg->raw_pos += offset;
 
 			if (i > mxt_obj_size(object))
 				continue;
 
-			//Raw file must include all objects to ensure
-			//correct programming of configuration
+			byte_offset = reg + i - cfg->start_ofs - cfg->object_skipped_ofs;
 
-			byte_offset = reg + i - cfg->start_ofs;
-
-			if (byte_offset >= 0 && byte_offset < cfg->mem_size) {
+			if (byte_offset >= 0) {
 				*(cfg->mem + byte_offset) = val;
 			} else {
-				dev_err(dev, "Bad object: reg:%d, T%d, ofs=%d\n",
+				dev_err(dev, "Bad object: reg: %d, T%d, ofs=%d\n",
 					reg, object->type, byte_offset);
 				return -EINVAL;
 			}
@@ -2279,10 +2333,14 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 
 		totalBytesToWrite = size;
 
-		while (byte_count < totalBytesToWrite) {
 
-			if (size > MXT_MAX_BLOCK_WRITE)
+		/* Write per object per instance per obj_size w/data in cfg.mem */
+		while (totalBytesToWrite > 0) {
+
+			if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE)
 				size = MXT_MAX_BLOCK_WRITE;
+			else 
+				size = totalBytesToWrite;
 
 			if (data->crc_enabled){
 				error = __mxt_write_reg_crc(data->client, reg, size, (cfg->mem + write_offset), data);
@@ -2295,39 +2353,12 @@ static int mxt_prepare_cfg_mem (struct mxt_data *data, struct mxt_cfg *cfg)
 				return error;
 
 			write_offset = write_offset + size;
-			byte_count = byte_count + size;
-			size = totalBytesToWrite - size;
+			totalBytesToWrite = totalBytesToWrite - size;
 		}
 
-		byte_count = 0;
 		msleep(20);
 
-		size = totalBytesToWrite;	//Total to read
-
-		while (byte_count < totalBytesToWrite) {
-
-			if (size > MXT_MAX_BLOCK_WRITE)
-				size = MXT_MAX_BLOCK_WRITE;
-
-			if (data->crc_enabled){
-				//Keep for debug.  msg_buf size caution.
-				error = __mxt_read_reg_crc(data->client, reg, size, data->msg_buf, data, true);
-
-			} else {
-				error = __mxt_read_reg(data->client, reg, size, data->msg_buf);
-			}
-
-			if (error)
-				return error;
-
-			read_offset = read_offset + size;
-			byte_count = byte_count + size;
-			size = totalBytesToWrite - size;
-		}
-
-		byte_count = 0;
-
-	}
+	} /* End of while loop */
 
 	return 0;
 }
@@ -2357,11 +2388,11 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 {
 	struct device *dev = &data->client->dev;
 	struct mxt_cfg cfg;
+	u32 info_crc, config_crc, calculated_crc;
+	u16 crc_start = 0;
 	int ret, error;
 	int offset;
 	int i;
-	u32 info_crc, config_crc, calculated_crc;
-	u16 crc_start = 0;
 
 	/* Make zero terminated copy of the OBP_RAW file */
 	cfg.raw = kmemdup_nul(fw->data, fw->size, GFP_KERNEL);
@@ -2385,7 +2416,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	cfg.raw_pos = strlen(MXT_CFG_MAGIC);
 
-	/* Load information block and check */
+	/* Load 7byte infoblock from config file */
 	for (i = 0; i < sizeof(struct mxt_info); i++) {
 		ret = sscanf(cfg.raw + cfg.raw_pos, "%hhx%n",
 			     (unsigned char *)&cfg.info + i,
@@ -2396,28 +2427,32 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 			goto release_raw;
 		}
 
+		/* Update position in raw file to info CRC */
 		cfg.raw_pos += offset;
 	}
 
+	/* Compare family id, file vs chip */
 	if (cfg.info.family_id != data->info->family_id) {
 		dev_err(dev, "Family ID mismatch!\n");
 		ret = -EINVAL;
 		goto release_raw;
 	}
 
+	/* Compare variant id, file vs chip */
 	if (cfg.info.variant_id != data->info->variant_id) {
 		dev_err(dev, "Variant ID mismatch!\n");
 		ret = -EINVAL;
 		goto release_raw;
 	}
 
-	/* Read CRCs */
+	/* Read Infoblock CRCs */
 	ret = sscanf(cfg.raw + cfg.raw_pos, "%x%n", &info_crc, &offset);
 	if (ret != 1) {
 		dev_err(dev, "Bad format: failed to parse Info CRC\n");
 		ret = -EINVAL;
 		goto release_raw;
 	}
+	/* Update position in raw file to config CRC */
 	cfg.raw_pos += offset;
 
 	ret = sscanf(cfg.raw + cfg.raw_pos, "%x%n", &config_crc, &offset);
@@ -2426,6 +2461,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		ret = -EINVAL;
 		goto release_raw;
 	}
+	/* Update position in raw file to first T object */
 	cfg.raw_pos += offset;
 
 	/*
@@ -2438,17 +2474,17 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		if (config_crc == 0 || data->config_crc == 0) {
 			dev_info(dev, "CRC zero, attempting to apply config\n");
 		} else if (config_crc == data->config_crc) {
-			dev_info(dev, "Config CRC 0x%06X: OK. No update required.\n",
+			dev_info(dev, "Config file CRC 0x%06X same as device CRC: No update required.\n",
 				 data->config_crc);
 			ret = 0;
 			goto enable_retrig;
 		} else {
-			dev_info(dev, "Config CRC 0x%06X: does not match file 0x%06X\n",
+			dev_info(dev, "Device config CRC 0x%06X: does not match file CRC 0x%06X: Updating...\n",
 				 data->config_crc, config_crc);
 		}
 	} else {
 		dev_warn(dev,
-			 "Warning: Info CRC error - device=0x%06X file=0x%06X\nFailed Config Programming\n",
+			 "Warning: Info CRC does not match: Error - device crc=0x%06X file=0x%06X\nFailed Config Programming\n",
 			 data->info_crc, info_crc);
 		goto release_raw; 
 	}
@@ -2470,7 +2506,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		goto release_mem;
 	}
 
-	dev_info(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
+	dev_dbg(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
 		cfg.mem_size, cfg.start_ofs, (long long)cfg.raw_pos, offset);
 
 	/* Prepares and programs configuration */
@@ -2478,8 +2514,8 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	if (ret)
 		goto release_mem;
 
-
-	/* Calculate crc of the received configs (not the raw config file) */
+	/* Calculate crc of the config file */
+	/* Config file must include all objects used in CRC calculation */
 
 	if (data->T14_address)
 		crc_start = data->T14_address;
@@ -2487,12 +2523,16 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		crc_start = data->T71_address;
 	else if (data->T7_address)
 		crc_start = data->T7_address;
+	/* Set position to next line */
 	else
 		dev_warn(dev, "Could not find CRC start\n");
 
+	dev_dbg(dev, "calculate_crc: crc_start %d, cfg.object_skipped_ofs %d, cfg.mem_size %i\n", 
+		cfg.mem_size, cfg.object_skipped_ofs, cfg.mem_size);
+
 	if (crc_start > cfg.start_ofs) {
 		calculated_crc = mxt_calculate_crc(cfg.mem,
-						   crc_start - cfg.start_ofs,
+						   crc_start - cfg.start_ofs - cfg.object_skipped_ofs,
 						   cfg.mem_size);
 
 		if (config_crc > 0 && config_crc != calculated_crc)
@@ -2515,13 +2555,13 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 enable_retrig:
 	if (!data->crc_enabled){
-	error = mxt_check_retrigen(data);
+		error = mxt_check_retrigen(data);
 	
-	if (error) {
-		dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
-		goto release_mem;
+		if (error) {
+			dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
+			goto release_mem;
+		}
 	}
-}
 
 release_mem:
 	kfree(cfg.mem);
@@ -2535,22 +2575,20 @@ static int mxt_clear_cfg(struct mxt_data *data)
 {
 	struct device *dev = &data->client->dev;
 	struct mxt_cfg config;
-	int size = 0;
-	int error;
-	int byte_count = 0;
+	int writeByteSize = 0;
 	int write_offset = 0;
 	int totalBytesToWrite = 0;
+	int error;
 
-
-	//Start of first Tobject address
-
+	/* Start of first Tobject address */
 	config.start_ofs = MXT_OBJECT_START +
 			data->info->object_num * sizeof(struct mxt_object) +
-			MXT_INFO_CHECKSUM_SIZE;		
-
+			MXT_INFO_CHECKSUM_SIZE;
 
 	config.mem_size = data->mem_size - config.start_ofs;
+	totalBytesToWrite = config.mem_size;
 
+	/* Allocate memory for full size of config space */
 	config.mem = kzalloc(config.mem_size, GFP_KERNEL);
 	if (!config.mem) {
 		error = -ENOMEM;
@@ -2560,22 +2598,21 @@ static int mxt_clear_cfg(struct mxt_data *data)
 	dev_dbg(dev, "clear_cfg: config.mem_size %i, config.start_ofs %i\n", 
 		config.mem_size, config.start_ofs);
 
-	totalBytesToWrite = config.mem_size;
-	size = totalBytesToWrite;
+	while (totalBytesToWrite > 0) {
 
-	while (byte_count < totalBytesToWrite) {
-
-		if (size > MXT_MAX_BLOCK_WRITE)
-			size = MXT_MAX_BLOCK_WRITE;
+		if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE)
+			writeByteSize = MXT_MAX_BLOCK_WRITE;
+		else
+			writeByteSize = totalBytesToWrite;
 
 		if (data->crc_enabled){
-			//Clear configuration
+			/* clear memory using config.mem buffer */
 			error = __mxt_write_reg_crc(data->client, (config.start_ofs + write_offset), 
-				size, (config.mem + write_offset), data);
+				writeByteSize, config.mem, data);
 
 		} else {
 			error = __mxt_write_reg(data->client, (config.start_ofs + write_offset), 
-				size, (config.mem + write_offset));
+				writeByteSize, config.mem);
 		}
 
 		if (error) {
@@ -2583,12 +2620,9 @@ static int mxt_clear_cfg(struct mxt_data *data)
 			goto release_mem;
 		}
 
-		write_offset = write_offset + size;
-		byte_count = byte_count + size;
-		size = totalBytesToWrite - size;
+		write_offset = write_offset + writeByteSize;
+		totalBytesToWrite = totalBytesToWrite - writeByteSize;
 	}
-
-	byte_count = 0;
 
 	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE);
 
@@ -2661,6 +2695,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 	/* Valid Report IDs start counting from 1 */
 	reportid = 1;
 	data->mem_size = 0;
+
 	for (i = 0; i < data->info->object_num; i++) {
 		struct mxt_object *object = object_table + i;
 		u8 min_id, max_id;
@@ -2874,12 +2909,10 @@ static int mxt_resync_comm(struct mxt_data *data)
 	dev_id_size = sizeof(struct mxt_info);
 
 	dev_id_buf = kzalloc(dev_id_size, GFP_KERNEL);
-
 	if (!dev_id_buf)
 		return -ENOMEM;
 
 	/* Start with TX seq_num 0x00 */
-
 	data->msg_num.txseq_num = 0;
 
 	//Use master send and master receive, 8bit CRC is turned OFF

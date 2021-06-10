@@ -489,10 +489,11 @@ struct mxt_data {
 
 	enum mxt_suspend_mode suspend_mode;
 
-	/* for config_fw updates, power up, irq handling */
+	/* for config_fw updates, power up, irq handling, reset */
 	bool irq_processing;
 	bool system_power_up;
 	u8 comms_failure_count;
+	bool mxt_reset_state;
 	volatile bool sysfs_updating_config_fw;
 
 	/* Debugfs variables */
@@ -4772,6 +4773,38 @@ out:
 	return ret;
 }
 
+static ssize_t mxt_reset_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	char c;
+
+	c = data->mxt_reset_state? '1' : '0';
+	return scnprintf(buf, PAGE_SIZE, "%c\n", c);
+}
+
+static ssize_t mxt_reset_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	u8 i;
+	ssize_t ret = 0;
+
+	if (kstrtou8(buf, 0, &i) == 0) {
+	
+		data->mxt_reset_state = true;
+
+		ret = mxt_soft_reset(data, true);
+
+		data->mxt_reset_state = false;
+		
+	} else {
+		data->mxt_reset_state = false;
+	}
+
+	return count;
+}
+
 static ssize_t mxt_crc_enabled_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -4946,6 +4979,7 @@ static DEVICE_ATTR(debug_notify, S_IRUGO, mxt_debug_notify_show, NULL);
 static DEVICE_ATTR(debug_irq, S_IWUSR | S_IRUSR, mxt_debug_irq_show,
 		   mxt_debug_irq_store);
 static DEVICE_ATTR(crc_enabled, S_IRUGO, mxt_crc_enabled_show, NULL);
+static DEVICE_ATTR(mxt_reset, S_IWUSR | S_IRUSR, mxt_reset_show, mxt_reset_store);
 
 static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
@@ -4960,6 +4994,7 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_debug_enable.attr,
 	&dev_attr_debug_v2_enable.attr,
 	&dev_attr_debug_notify.attr,
+	&dev_attr_mxt_reset.attr,
 	NULL
 };
 

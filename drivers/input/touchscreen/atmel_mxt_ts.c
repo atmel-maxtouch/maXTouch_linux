@@ -2478,7 +2478,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 			dev_info(dev, "Config file CRC 0x%06X same as device CRC: No update required.\n",
 				 data->config_crc);
 			ret = 0;
-			goto enable_retrig;
+			goto release_raw;
 		} else {
 			dev_info(dev, "Device config CRC 0x%06X: does not match file CRC 0x%06X: Updating...\n",
 				 data->config_crc, config_crc);
@@ -2554,7 +2554,6 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	/* T7 config may have changed */
 	mxt_init_t7_power_cfg(data);
 
-enable_retrig:
 	if (!data->crc_enabled){
 		error = mxt_check_retrigen(data);
 	

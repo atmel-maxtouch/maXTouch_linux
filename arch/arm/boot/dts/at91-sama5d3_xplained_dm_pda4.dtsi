@@ -70,11 +70,23 @@
 				atmel_mxt_ts@4a {
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4a>;
-					reset-gpios = <&pioE 6 GPIO_ACTIVE_LOW>;
+					reset-gpios = <&pioE 8 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */
 					pinctrl-names = "default";
-					pinctrl-0 = <&pinctrl_mxt_irq &pinctrl_mxt_rst>;
+					pinctrl-0 = <&pinctrl_mxt_irq1 &pinctrl_mxt_rst>;
+				};
+
+			};
+
+			i2c2: i2c@f801c000 {
+				atmel_mxt_ts@4c {
+					compatible = "atmel,atmel_mxt_ts";
+					reg = <0x4c>;
+					interrupt-parent = <&pioE>;
+					interrupts = <6 0x2>;	/* Falling edge only */
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_mxt_irq2>;
 				};
 
 			};
@@ -108,14 +120,19 @@
 							<AT91_PIOE 8 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
 					};
 
-					pinctrl_mxt_irq: mxt_irq {
+					pinctrl_mxt_irq1: mxt_irq1 {
 						atmel,pins =
 							<AT91_PIOE 7 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
 					};
 
+					pinctrl_mxt_irq2: mxt_irq2 {
+						atmel,pins =
+							<AT91_PIOE 6 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
+					};
+
 					pinctrl_mxt_rst: mxt_rst {
 						atmel,pins =
-							<AT91_PIOE 6 AT91_PERIPH_GPIO AT91_PINCTRL_DEGLITCH>;
+							<AT91_PIOE 8 AT91_PERIPH_GPIO AT91_PINCTRL_DEGLITCH>;
 					};
 				};
 			};

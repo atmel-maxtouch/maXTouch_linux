@@ -2366,6 +2366,63 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 static int mxt_init_t7_power_cfg(struct mxt_data *data);
 
+static int mxt_clear_cfg(struct mxt_data *data, struct mxt_cfg *cfg)
+{
+	struct device *dev = &data->client->dev;
+	u16 config_size = 0;
+	int writeByteSize = 0;
+	int write_offset = 0;
+	int totalBytesToWrite = 0;
+	int error;
+	int *cbuff;
+
+	config_size = data->mem_size - cfg->start_ofs;
+	totalBytesToWrite = config_size;
+
+	cbuff = kzalloc(config_size, GFP_KERNEL);
+	if (!cbuff) {
+		error = -ENOMEM;
+		goto release_cbuff;
+	}
+
+	while (totalBytesToWrite > 0) {
+
+		if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE)
+			writeByteSize = MXT_MAX_BLOCK_WRITE;
+		else
+			writeByteSize = totalBytesToWrite;
+
+		if (data->crc_enabled){
+			/* clear memory using config.mem buffer */
+			error = __mxt_write_reg_crc(data->client, (cfg->start_ofs + write_offset), 
+				writeByteSize, cbuff, data);
+
+		} else {
+			error = __mxt_write_reg(data->client, (cfg->start_ofs + write_offset), 
+				writeByteSize, cbuff);
+		}
+
+		if (error) {
+			dev_info(dev, "Error writing configuration\n");
+			goto release_cbuff;
+		}	 	
+
+		write_offset = write_offset + writeByteSize;
+		totalBytesToWrite = totalBytesToWrite - writeByteSize;
+	}
+
+	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE);
+
+	msleep(300);
+
+	dev_info(dev, "Config successfully cleared\n");
+
+release_cbuff:
+	kfree(cbuff);
+
+	return error;
+}
+
 /*
  * mxt_update_cfg - download configuration to chip
  *
@@ -2510,6 +2567,8 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	dev_dbg(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
 		cfg.mem_size, cfg.start_ofs, (long long)cfg.raw_pos, offset);
 
+	ret = mxt_clear_cfg(data, &cfg);
+
 	/* Prepares and programs configuration */
 	ret = mxt_prepare_cfg_mem(data, &cfg);
 	if (ret)
@@ -2569,70 +2628,6 @@ release_raw:
 	kfree(cfg.raw);
 
 	return ret;
-}
-
-static int mxt_clear_cfg(struct mxt_data *data)
-{
-	struct device *dev = &data->client->dev;
-	struct mxt_cfg config;
-	int writeByteSize = 0;
-	int write_offset = 0;
-	int totalBytesToWrite = 0;
-	int error;
-
-	/* Start of first Tobject address */
-	config.start_ofs = MXT_OBJECT_START +
-			data->info->object_num * sizeof(struct mxt_object) +
-			MXT_INFO_CHECKSUM_SIZE;
-
-	config.mem_size = data->mem_size - config.start_ofs;
-	totalBytesToWrite = config.mem_size;
-
-	/* Allocate memory for full size of config space */
-	config.mem = kzalloc(config.mem_size, GFP_KERNEL);
-	if (!config.mem) {
-		error = -ENOMEM;
-		goto release_mem;
-	}
-
-	dev_dbg(dev, "clear_cfg: config.mem_size %i, config.start_ofs %i\n", 
-		config.mem_size, config.start_ofs);
-
-	while (totalBytesToWrite > 0) {
-
-		if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE)
-			writeByteSize = MXT_MAX_BLOCK_WRITE;
-		else
-			writeByteSize = totalBytesToWrite;
-
-		if (data->crc_enabled){
-			/* clear memory using config.mem buffer */
-			error = __mxt_write_reg_crc(data->client, (config.start_ofs + write_offset), 
-				writeByteSize, config.mem, data);
-
-		} else {
-			error = __mxt_write_reg(data->client, (config.start_ofs + write_offset), 
-				writeByteSize, config.mem);
-		}
-
-		if (error) {
-			dev_info(dev, "Error writing configuration\n");
-			goto release_mem;
-		}
-
-		write_offset = write_offset + writeByteSize;
-		totalBytesToWrite = totalBytesToWrite - writeByteSize;
-	}
-
-	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE);
-
-	msleep(300);
-
-	dev_info(dev, "Config successfully cleared\n");
-
-release_mem:
-	kfree(config.mem);
-	return error;
 }
 
 static void mxt_free_input_device(struct mxt_data *data)
@@ -3773,9 +3768,9 @@ static int mxt_initialize(struct mxt_data *data)
 		if (error) {
 			dev_err(&client->dev, "Failed to initialize power cfg\n");
 			return error;
-	}
+		}
 
-	if (data->multitouch) {
+		if (data->multitouch) {
 
 			dev_info(&client->dev, "mxt_init: Registering devices\n");
 			error = mxt_initialize_input_device(data);
@@ -3787,13 +3782,14 @@ static int mxt_initialize(struct mxt_data *data)
 			
 			if (data->T100_instances > 1) {
 			    error = mxt_init_secondary_input(data);
+			    
 			    if (error)
 				    dev_warn(&client->dev, "Error %d registering secondary device\n", error);
 			}
 		} else {
 			dev_warn(&client->dev, "No touch object detected\n");
 		}
-
+	
 		mxt_debug_init(data);
 
 		data->system_power_up = false;
@@ -3801,8 +3797,9 @@ static int mxt_initialize(struct mxt_data *data)
 
 	data->irq_processing = true;
 
-	if(!data->crc_enabled){
+	if(!data->crc_enabled) {
 		error = mxt_check_retrigen(data);
+
 		if (error) 
 			dev_err(&client->dev, "RETRIGEN Not Enabled or unavailable\n");
 	}
@@ -4660,11 +4657,6 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	data->sysfs_updating_config_fw = true;
 	data->irq_processing = true;
 
- 	error = mxt_clear_cfg(data);
-
- 	if (error)
-		dev_err(dev, "Failed clear configuration\n");
-
 	error = mxt_load_fw(dev, MXT_FW_NAME);
 	if (error) {
 		dev_err(dev, "The firmware update failed(%d)\n. IRQ disabled.", error);
@@ -4724,7 +4716,7 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 	const struct firmware *cfg;
-	int ret, error;
+	int ret;
 
 	data->sysfs_updating_config_fw = true;
 
@@ -4741,16 +4733,6 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 		dev_info(dev, "Found configuration file: %s\n",
 			MXT_CFG_NAME);
 	}
-
-	error = mxt_clear_cfg(data);
-
-	if (error)
-		dev_err(dev, "Failed clear configuration\n");
-
-	//Captures messages in buffer left over from clear_cfg()
-	error = mxt_process_messages_until_invalid(data);
-	if (error)
-		dev_err(dev, "Failed process configuration\n");
 
 	if (data->suspend_mode == MXT_SUSPEND_DEEP_SLEEP) {
 		mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);

@@ -70,6 +70,7 @@
 				atmel_mxt_ts@4a {
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4a>;
+					resync-enabled;
 					reset-gpios = <&pioE 6 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */

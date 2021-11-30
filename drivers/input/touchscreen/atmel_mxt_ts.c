@@ -414,7 +414,8 @@ struct mxt_data {
 	struct mxt_dbg dbg;
 	#endif
 	struct gpio_desc *reset_gpio;
-	u16 retry_count;
+	u8 crc_err_count;
+	bool is_resync_enabled;
 
 	/* Cached parameters from object table */
 	u16 T5_address;
@@ -1014,15 +1015,17 @@ static int __mxt_read_reg(struct i2c_client *client,
 	return ret;
 }
 
+static int mxt_resync_comm(struct mxt_data *data);
+
 static int __mxt_read_reg_crc(struct i2c_client *client,
 			       u16 reg, u16 len, void *val, struct mxt_data *data, bool crc8)
 {
 	u8 *buf;
 	size_t count;
-	int ret;
-	int i;
 	u8 crc_data = 0;
 	char *ptr_data;
+	int ret = 0;
+	int i;
 
 	count = 4;	//16bit addr, tx_seq_num, 8bit crc
 
@@ -1030,13 +1033,15 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 	if (!buf)
 		return -ENOMEM;
 
-	if (crc8 && data->crc_enabled) {
+	if ((crc8 || (reg == data->T144_address)) && data->system_power_up) {
+
 		buf[0] = reg & 0xff;
 		buf[1] = ((reg >> 8) & 0xff);
 		buf[2] = mxt_update_seq_num(data, false, 0x00);
 
 		for (i = 0; i < (count-1); i++) {
 			crc_data = __mxt_calc_crc8(crc_data, buf[i]);
+			dev_dbg(&client->dev, "Write: Data = [%x], crc8 =  %x\n", buf[i], crc_data);
 		}
 
 		buf[3] = crc_data;
@@ -1055,30 +1060,35 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 		}
 	}
 
-	//Read data and check 8bit CRC
+		//Read data and check 8bit CRC
 	ret = i2c_master_recv(client, val, len);
 	
 	if (ret == len) {		
 		ptr_data = val;
 
-		if (crc8) {
+		if ((reg == data->T5_address || reg == data->T144_address) && (data->system_power_up)) {
+
 			crc_data = 0;
+
 			for (i = 0; i < (len - 1); i++){
 				crc_data = __mxt_calc_crc8(crc_data, ptr_data[i]);
-				dev_dbg(&client->dev, "Data = [%x], crc8 =  %x\n", ((char *) ptr_data)[i], crc_data);
+				dev_dbg(&client->dev, "Read: Data = [%x], crc8 =  %x\n", ((char *) ptr_data)[i], crc_data);
 			}
 
 			if (crc_data == ptr_data[len - 1]){
-				dev_dbg(&client->dev, "T5 Read CRC Passed\n");	
-			}
-			else {
-				dev_dbg(&client->dev, "T5 Read CRC Failed\n");	
+				dev_dbg(&client->dev, "Read CRC Passed\n");
+				ret = 0;
+				goto end_reg_read;
+			} else {
+				dev_err(&client->dev, "Read CRC Failed at seq_num[%d]\n", buf[2]);
+				data->crc_err_count++;
 			}	
 		}
-		ret = 0;
+
+		ret = 0;	/* Needed for crc8 = false */
+
 	} else {
 			ret = -EIO;
-
 			dev_err(&client->dev, "%s: i2c receive failed (%d)\n",
 				__func__, ret);
 	}
@@ -1159,7 +1169,6 @@ static int __mxt_write_reg_crc(struct i2c_client *client, u16 reg, u16 length,
 
 	do {
 		write_addr = reg + bytesWritten;
-		dev_dbg(&client->dev, "Reg address %x", write_addr);
 
 		msgbuf[0] = write_addr & 0xff;
 		msgbuf[1] = (write_addr >> 8) & 0xff;
@@ -1254,8 +1263,6 @@ static struct mxt_object *mxt_get_object(struct mxt_data *data, u8 type)
 	return NULL;
 }
 
-static int mxt_resync_comm(struct mxt_data *data);
-
 static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 {
 	struct device *dev = &data->client->dev;
@@ -1288,17 +1295,18 @@ static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 
 	if (status & MXT_T6_STATUS_COMSERR) {
 
-		data->comms_failure_count++;
+		if (data->crc_enabled && data->is_resync_enabled) {
+ 			data->comms_failure_count++;
 
-		if (data->comms_failure_count == 0x05) {
-			ret = mxt_resync_comm(data);
-			if (ret)
-				dev_dbg(dev, "T6 COMSERR Error\n");
+			if (data->comms_failure_count == 0x05) {
+				ret = mxt_resync_comm(data);
 
-			data->comms_failure_count = 0;
+				if (ret)
+					dev_err(dev, "T6 COMSERR Error\n");
+			}
+		} else if (status != data->t6_status) {
+			dev_err(dev, "T6 COMSERR Error\n");
 		}
-	} else {
-		data->comms_failure_count = 0;
 	}
 
 	/* Save current status */
@@ -1766,6 +1774,11 @@ static int mxt_read_and_process_messages(struct mxt_data *data, u8 count, bool c
 				data->T5_msg_size, data->msg_buf);
 		}
 
+		if (data->crc_enabled && data->is_resync_enabled) {
+			if (data->crc_err_count > 0x03) 
+				ret = mxt_resync_comm(data);
+		}
+
 		if (ret) {
 			dev_err(dev, "Failed to read %u messages (%d)\n", count, ret);
 			return ret;
@@ -1822,16 +1835,20 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	  	return IRQ_HANDLED;
 	}
 
+	if (data->crc_err_count > 0x03 && data->crc_enabled 
+		&& data->is_resync_enabled) {
+		ret = mxt_resync_comm(data);
+		return IRQ_HANDLED;
+	}
+
 	if (count > data->max_reportid) {
 		dev_warn(dev, "T44/T144 count %d exceeded max report id\n", count);
 
-		if (count == 0xa6 && data->crc_enabled == true)
-		{
-			// Try resync
-			// Reovery requires RETRIGEN bit to be enabled
+		if (data->crc_enabled && data->is_resync_enabled) {
+			// Recovery requires RETRIGEN bit to be enabled in config
 			ret = mxt_resync_comm(data);
 		}
-		
+
 		return IRQ_HANDLED;
 	}
 
@@ -1911,7 +1928,7 @@ static irqreturn_t mxt_process_messages(struct mxt_data *data)
 		count = 1;
 
 	/* include final invalid message */
-	total_handled = mxt_read_and_process_messages(data, count + 1, false);
+	total_handled = mxt_read_and_process_messages(data, count + 1, true);
 	if (total_handled < 0) {
 	        dev_dbg(dev, "Interrupt occurred but no message\n");
 		return IRQ_HANDLED;
@@ -1923,7 +1940,7 @@ static irqreturn_t mxt_process_messages(struct mxt_data *data)
 
 	/* keep reading two msgs until one is invalid or reportid limit */
 	do {
-		num_handled = mxt_read_and_process_messages(data, 2, false);
+		num_handled = mxt_read_and_process_messages(data, 2, true);
 		if (num_handled < 0) {
 			dev_dbg(dev, "Interrupt occurred but no message\n");
 			return IRQ_HANDLED;
@@ -2861,6 +2878,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			data->T144_address = object->start_address;
 			data->crc_enabled = true;
 			data->skip_crc_write = false;
+			data->crc_err_count = 0x00;
 			dev_info(&client->dev, "CRC enabled\n");
 			break;
 		}
@@ -2901,19 +2919,22 @@ static int mxt_resync_comm(struct mxt_data *data)
 	u8 *crc_ptr;
 	u16 count = 0;
 	bool insync = false;
-	
-	if (data->raw_info_block)
-		mxt_free_object_table(data);
 
 	/* Read 7-byte ID information block starting at address 0 */
 	dev_id_size = sizeof(struct mxt_info);
 
 	dev_id_buf = kzalloc(dev_id_size, GFP_KERNEL);
-	if (!dev_id_buf)
-		return -ENOMEM;
+	if (!dev_id_buf) {
+		error = -ENOMEM;
+		goto err_free_mem;
+	}
 
 	/* Start with TX seq_num 0x00 */
 	data->msg_num.txseq_num = 0;
+
+	/* reset counters */
+	data->crc_err_count = 0;
+	data->comms_failure_count = 0;
 
 	//Use master send and master receive, 8bit CRC is turned OFF
 	error = __mxt_read_reg_crc(data->client, 0, dev_id_size, dev_id_buf, data, true);
@@ -3056,7 +3077,7 @@ static int mxt_resync_comm(struct mxt_data *data)
 
 err_free_mem:
 	kfree(dev_id_buf);
-	
+
 	return error;
 }
 
@@ -3078,7 +3099,7 @@ static int mxt_read_info_block(struct mxt_data *data)
 	error = mxt_write_addr_crc(data->client, info_addr, 0x00, data); 
 	if (error)
 		return error;
-	
+
 	/* Read 7-byte ID information block starting at address 0 */
 	size = sizeof(struct mxt_info);
 	id_buf = kzalloc(size, GFP_KERNEL);
@@ -3167,6 +3188,7 @@ static int mxt_read_info_block(struct mxt_data *data)
 
 err_free_mem:
 	kfree(id_buf);
+
 	return error;
 }
 
@@ -3713,6 +3735,7 @@ static int mxt_initialize(struct mxt_data *data)
 	int error;
 
 	while (1) {
+
 		error = mxt_read_info_block(data);
 		if (!error)
 			break;
@@ -3745,6 +3768,8 @@ static int mxt_initialize(struct mxt_data *data)
 			msleep(MXT_FW_RESET_TIME);
 		}
 	}
+
+	data->system_power_up = true;
 
 	if(!data->crc_enabled) {
 		error = mxt_check_retrigen(data);
@@ -3796,7 +3821,6 @@ static int mxt_initialize(struct mxt_data *data)
 
 		mxt_debug_init(data);
 
-		data->system_power_up = false;
 	}
 
 	data->irq_processing = true;
@@ -4473,7 +4497,7 @@ static ssize_t mxt_object_show(struct device *dev,
 			u16 addr = object->start_address + j * size;
 
 			if (data->crc_enabled)
-				error = __mxt_read_reg_crc(data->client, addr, size, obuf, data, false);
+				error = __mxt_read_reg_crc(data->client, addr, size, obuf, data, true);
 			else 
 				error = __mxt_read_reg(data->client, addr, size, obuf);
 
@@ -5134,6 +5158,8 @@ static int mxt_parse_device_properties(struct mxt_data *data)
 	int n_keys;
 	int error;
 
+	data->is_resync_enabled = false;
+
 	if (device_property_present(dev, keymap_property)) {
 		n_keys = device_property_read_u32_array(dev, keymap_property,
 							NULL, 0);
@@ -5160,6 +5186,8 @@ static int mxt_parse_device_properties(struct mxt_data *data)
 		data->t19_keymap = keymap;
 		data->t19_num_keys = n_keys;
 	}
+
+	data->is_resync_enabled = device_property_read_bool(dev, "resync-enabled");
 
 	return 0;
 }
@@ -5274,7 +5302,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	data->msg_num.txseq_num = 0x00; //Initialize the TX seq_num
 	data->crc_enabled = false;	//Initialize the crc bit
 	data->sysfs_updating_config_fw = false;
-	data->system_power_up = true;
+	data->comms_failure_count = 0;
 	data->irq_processing = true;
 
 	error = mxt_initialize(data);

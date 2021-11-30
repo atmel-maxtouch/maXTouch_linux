@@ -71,7 +71,7 @@
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4a>;
 					resync-enabled;
-					reset-gpios = <&pioE 6 GPIO_ACTIVE_LOW>;
+					reset-gpios = <&pioE 8 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */
 					pinctrl-names = "default";

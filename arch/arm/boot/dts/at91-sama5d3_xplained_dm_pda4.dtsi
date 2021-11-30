@@ -70,6 +70,7 @@
 				atmel_mxt_ts@4a {
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4a>;
+					resync-enabled;
 					reset-gpios = <&pioE 8 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */
@@ -83,6 +84,7 @@
 				atmel_mxt_ts@4c {
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4c>;
+					resync-enabled;
 					interrupt-parent = <&pioE>;
 					interrupts = <6 0x2>;	/* Falling edge only */
 					pinctrl-names = "default";

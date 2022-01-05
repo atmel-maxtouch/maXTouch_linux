@@ -66,14 +66,16 @@
 #define MXT_TOUCH_KEYARRAY_T15		15
 #define MXT_SPT_COMMSCONFIG_T18		18
 #define MXT_SPT_GPIOPWM_T19		19
-#define MXT_TOUCH_PROXIMITY_T23		23
-#define MXT_TOUCH_PROXKEY_T52		52
 #define MXT_PROCI_GRIPFACE_T20		20
+#define MXT_SPT_PWM_T21			21
 #define MXT_PROCG_NOISE_T22		22
+#define MXT_TOUCH_PROXIMITY_T23		23
 #define MXT_PROCI_ONETOUCH_T24		24
 #define MXT_SPT_SELFTEST_T25		25
 #define MXT_PROCI_TWOTOUCH_T27		27
 #define MXT_SPT_CTECONFIG_T28		28
+#define MXT_SPT_T33		33
+#define MXT_SPT_T36     36
 #define MXT_DEBUG_DIAGNOSTIC_T37	37
 #define MXT_SPT_USERDATA_T38		38
 #define MXT_PROCI_GRIP_T40		40
@@ -84,6 +86,7 @@
 #define MXT_SPT_CTECONFIG_T46		46
 #define MXT_PROCI_STYLUS_T47		47
 #define MXT_PROCG_NOISESUPPRESSION_T48	48
+#define MXT_TOUCH_PROXKEY_T52		52
 #define MXT_GEN_DATASOURCE_T53		53
 #define MXT_PROCI_SHIELDLESS_T56	56
 #define MXT_SPT_TIMER_T61		61
@@ -100,10 +103,11 @@
 #define MXT_PROCI_SYMBOLGESTUREPROCESSOR_T92	   92
 #define MXT_PROCI_TOUCHSEQUENCELOGGER_T93	   93
 #define MXT_TOUCH_MULTITOUCHSCREEN_T100 	   100
+#define MXT_TOUCHSCREEN_HOVER_T101	101
 #define MXT_SPT_AUXTOUCHCONFIG_T104		   104
+#define MXT_PROCI_ACTIVESTYLUS_T107		   107
 #define MXT_PROCG_NOISESUPSELFCAP_T108		   108
 #define MXT_SPT_SELFCAPGLOBALCONFIG_T109	   109
-#define MXT_PROCI_ACTIVESTYLUS_T107		   107
 #define MXT_SPT_CAPTUNINGPARAMS_T110		   110
 #define MXT_SPT_SELFCAPCONFIG_T111		   111
 #define MXT_PROCI_SELFCAPGRIPSUPPRESSION_T112	   112
@@ -113,7 +117,10 @@
 #define MXT_SPT_DATACONTAINERCTRL_T118		   118
 #define MXT_PROCI_HOVERGESTUREPROCESSOR_T129	   129
 #define MXT_SPT_SELCAPVOLTAGEMODE_T133		   133
-#define PROCG_IGNORENODES_T141			   141
+#define MXT_PROCI_MCTCHARGEBALANCE_T134		134
+#define MXT_SPT_EDGESHAPERCTRL_T136		136
+#define MXT_SPT_EDGESHAPERSETTINGS_T138		138
+#define MXT_PROCG_IGNORENODES_T141			   141
 #define MXT_SPT_MESSAGECOUNT_T144		   144
 #define MXT_SPT_IGNORENODESCONTROL_T145		   145
 
@@ -129,12 +136,20 @@
 #define MXT_COMMAND_DIAGNOSTIC	5
 
 /* Define for T6 status byte */
-#define MXT_T6_STATUS_RESET	BIT(7)
-#define MXT_T6_STATUS_OFL	BIT(6)
+#define MXT_T6_STATUS_RESET		BIT(7)
+#define MXT_T6_STATUS_OFL		BIT(6)
 #define MXT_T6_STATUS_SIGERR	BIT(5)
-#define MXT_T6_STATUS_CAL	BIT(4)
+#define MXT_T6_STATUS_CAL		BIT(4)
 #define MXT_T6_STATUS_CFGERR	BIT(3)
 #define MXT_T6_STATUS_COMSERR	BIT(2)
+
+/* Define live diagnostic status bits */
+#define MXT_T33_STATUS_POWER	BIT(3)
+#define MXT_T33_STATUS_FPC		BIT(2)
+#define MXT_T33_STATUS_LINE		BIT(1)
+#define MXT_T33_STATUS_BULK		BIT(0)
+
+
 
 /* MXT_GEN_POWER_T7 field */
 struct t7_config {
@@ -200,6 +215,12 @@ struct t37_debug {
 #define MXT_RESET_VALUE		0x01
 #define MXT_BACKUP_VALUE	0x55
 #define MXT_BACKUP_W_STOP	0x33
+
+/* Define for Live Diagnostic */
+
+#define MXT_T33_CTRL		0
+
+#define MXT_COMPRESS_MSG_MSK	0x04
 
 /* Define for MXT_PROCI_TOUCHSUPPRESSION_T42 */
 #define MXT_T42_MSG_TCHSUP	BIT(0)
@@ -284,6 +305,7 @@ enum t100_type {
 /* Touchscreen absolute values */
 #define MXT_MAX_AREA		0xff
 #define MXT_PIXELS_PER_MM	20
+#define MXT_STATUS_MAX_VALUE	0xF0
 
 /* Debug message size max */
 #define DEBUG_MSG_MAX		200
@@ -369,6 +391,7 @@ struct mxt_data {
 	struct input_dev *input_dev;
 	struct input_dev *input_dev_sec;
 	char phys[64];		/* device physical location */
+	unsigned int crcTable[256];
 	struct mxt_object *object_table;
 	struct mxt_info *info;
 	struct mxt_crc msg_num;
@@ -400,6 +423,9 @@ struct mxt_data {
 	u32 info_crc;
 	u8 bootloader_addr;
 	u8 *msg_buf;
+	u8 *t33_msg_buf;
+	u8 t33_status;
+	u8 ld_counter;
 	u8 t6_status;
 	bool update_input;
 	bool update_input_sec;
@@ -438,6 +464,11 @@ struct mxt_data {
 	u8 T25_reportid_min;
 	u8 T27_reportid_min;
 	u8 T27_reportid_max;
+	u8 T33_msg_size;
+	u16 T33_address;
+	u8 T33_reportid_min;
+	u8 T33_reportid_max;
+	u16 T36_address;
 	u8 T42_reportid_min;
 	u8 T42_reportid_max;
 	u16 T44_address;
@@ -472,6 +503,8 @@ struct mxt_data {
 	/* Cached instance parameter */
 	u8 T100_instances;
 	u8 T15_instances;
+	u8 T33_instances;
+	u8 T33_num_touchids;
 
 	/* for fw update in bootloader */
 	struct completion bl_completion;
@@ -960,6 +993,50 @@ static int mxt_send_bootloader_cmd(struct mxt_data *data, bool unlock)
 	return 0;
 }
 
+/* CRC based on lookup table of 256 elements
+*  Initialize look up table 
+*
+*/
+
+static void __mxt_calc_crc8_init(struct mxt_data *data)
+{
+
+	u8 _crc;
+	int i;
+	u8 bit;
+
+	for (i = 0; i < 0x100; i++) {
+
+		_crc = i;
+
+		for (bit = 0; bit < 8; bit++) {
+			_crc = (_crc & 0x80) ? ((_crc << 1) ^ 0x1D) : (_crc << 1);
+		}
+
+		data->crcTable[i] = _crc;
+
+	}
+}
+
+static u8 __mxt_calc_crc8_ld(struct mxt_data *data, u8 *crc, 
+	unsigned int len)
+{
+	struct i2c_client *client = data->client;
+	const u8 *ptr = crc;
+	u8 _crc = 0x00;	/* Initial value */
+
+	while (len--) {
+
+		dev_dbg(&client->dev, "MSG[%d] = [%x], crc8 =  %x\n", len,
+			*ptr, _crc);
+
+		_crc = data->crcTable[_crc ^ *ptr++];
+
+	}
+
+	return _crc;
+}
+
 static u8 __mxt_calc_crc8(unsigned char crc, unsigned char data)
 {
 
@@ -1313,6 +1390,164 @@ static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 	data->t6_status = status;
 }
 
+static void mxt_proc_t33_messages(struct mxt_data *data, u8 *msg)
+{
+	struct i2c_client *client = data->client;
+	bool msg_compressed = false;
+	u8 msg_reportid = msg[0];
+	u8 msg_status = msg[2];
+	bool error = false;
+	u8 crc_msg_count = 0;
+	u8 crc_data = 0;
+	int val;
+	int i;
+	
+	/* Convert current reportid to index number */
+	msg_reportid = msg_reportid - data->T33_reportid_min;
+
+	//memset(data->t33_msg_buf, 0, (data->T33_num_touchids * data->T5_msg_size));
+
+	//dev_info(&client->dev, "What is size of msg_buf %d", (data->T33_num_touchids * data->T5_msg_size));
+
+	if (msg[0] == data->T33_reportid_min) {
+
+		if (data->T33_address)
+			if (!data->crc_enabled)
+				__mxt_read_reg(client, data->T33_address + MXT_T33_CTRL,
+			 	1, &val);
+
+		if ((val & MXT_COMPRESS_MSG_MSK) == 0x04)
+			msg_compressed = true;
+	}
+
+	switch(msg_reportid) {
+
+	case 0x00:
+		/* Store CRC, Status and first 7 bytes of message */
+		memcpy(&data->t33_msg_buf[0], (msg + 1) , 9);
+
+		if (msg_compressed == true) {
+			//dev_info(&client->dev, "did I get here\n");
+			//dev_info(&client->dev, "message byte %x", msg[5]);
+			data->ld_counter = data->t33_msg_buf[4];
+			data->t33_msg_buf[40] = data->ld_counter;
+		}
+
+		//for (i = 0; i < 40; i++) {
+		//dev_info(&client->dev, "Data[%d] = %x", i, data->t33_msg_buf[i]);
+		//}
+
+
+		if (msg_compressed == true && error == false) {
+
+			//crc_data = __mxt_calc_crc8_ld(data, data->t33_msg_buf, 0x28);
+			crc_data = __mxt_calc_crc8_ld(data, (data->t33_msg_buf + 1), 0x28);
+			dev_dbg(&client->dev, "Resulting CRC = %x", crc_data);
+
+			dev_dbg(&client->dev, "Message CRC = %x", data->t33_msg_buf[0]);
+
+			if (crc_data == data->t33_msg_buf[0]) {
+				dev_dbg(&client->dev, "CRC Passed\n");
+			}
+			else
+				dev_dbg(&client->dev, "CRC_Failed\n");
+		}
+
+		if (msg[2] & 0xF0) {
+			dev_info(&client->dev, "Status 0x%02X%s%s%s%s\n",
+			msg[2],
+			msg[2] & MXT_T33_STATUS_BULK ? " BULK ERROR" : "",
+			msg[2] & MXT_T33_STATUS_LINE ? " LINE ERROR" : "",
+			msg[2] & MXT_T33_STATUS_FPC ? " FPC ERROR" : "",
+			msg[2] & MXT_T33_STATUS_POWER ? " POWER ERROR" : "");
+
+			data->t33_status = (msg[2] & 0xF0);
+		} else {
+
+			data->t33_status = 0x00;
+		}
+
+		break;
+
+	case 0x01:
+	case 0x02:
+	case 0x03:
+		/* Store 9 byte message */
+		memcpy(&data->t33_msg_buf[(9 * msg_reportid)], (msg + 1), 9);
+		break;
+
+	case 0x04:
+		/* Store last 5 bytes of message */
+
+		memcpy(&data->t33_msg_buf[(9 * msg_reportid)], (msg + 1), 5);
+
+		crc_data = __mxt_calc_crc8_ld(data, (data->t33_msg_buf + 1), 0x28);
+		dev_dbg(&client->dev, "Resulting CRC = %x", crc_data);
+
+		dev_dbg(&client->dev, "Message CRC = %x", data->t33_msg_buf[0]);
+
+		if (crc_data == data->t33_msg_buf[0]) {
+			dev_dbg(&client->dev, "CRC Passed\n");
+		}
+		else
+			dev_dbg(&client->dev, "CRC_Failed\n");
+
+		break;
+
+	}
+
+
+
+	//for (i = 0; i <= 40; i++) {
+	//	dev_info(&client->dev, "Data[%d] = %x", i, data->t33_msg_buf[i]);
+	//}
+
+	//dev_info(&client->dev, "msg_reportid %x, msg_index %x, data->T5_msg_size %d", 
+	//	msg_reportid, msg_index, data->T5_msg_size);
+
+//	if (msg[0] == data->T33_reportid_min) {
+//
+//		if (data->T33_address)
+//			if (!data->crc_enabled)
+//				__mxt_read_reg(client, data->T33_address + MXT_T33_CTRL,
+//			 	1, &val);
+//
+//		if ((val & MXT_COMPRESS_MSG_MSK) == 0x04)
+//			msg_compressed = true;
+//	}
+
+	/* Verify all messages received */
+
+	//if (msg[0] == data->T33_reportid_min) {
+
+	//	dev_info(&client->dev, "Got message %x", msg[0]);
+
+		//if (msg_compressed == false)
+			//crc_msg_count = data->T5_msg_size * data->T33_instances;
+			//crc_msg_count = 8 * data->T33_instances;
+		//else 
+		//crc_msg_count = data->T5_msg_size
+
+	//	crc_msg_count = 8;
+
+
+	//}	
+
+
+	//} else if (msg_compressed == false || error == true) {
+		/* Calculate CRC8 of message if all of messages received */
+	//	if (msg_index == (data->T33_reportid_max - data->T33_reportid_min) 
+		//	* data->T33_msg_size) {
+
+		//	for (i = 0; i < (crc_msg_count-1); i++) {
+				//	crc_data = __mxt_calc_crc8(crc_data, data->t33_msg_buf[i]);
+					//dev_info(&client->dev, "T33_2: MSG_Data = [%x], crc8 =  %x\n", data->t33_msg_buf[i], crc_data);
+			//}
+		//}
+
+	//}
+}
+
 static int mxt_write_object(struct mxt_data *data,
 				 u8 type, u8 offset, u8 val)
 {
@@ -1596,6 +1831,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 		  	input_report_abs(input_dev, ABS_MT_PRESSURE, pressure);
 		  	input_report_abs(input_dev, ABS_MT_DISTANCE, distance);
 		  	input_report_abs(input_dev, ABS_MT_ORIENTATION, orientation);
+		  	input_report_abs(input_dev, ABS_MISC, data->t33_status);
 		}
 	} else {
 		 
@@ -1716,6 +1952,10 @@ static int mxt_proc_message(struct mxt_data *data, u8 *message)
 	} else if (report_id >= data->T42_reportid_min
 		   && report_id <= data->T42_reportid_max) {
 		mxt_proc_t42_messages(data, message);
+	} else if (report_id >= data->T33_reportid_min
+		&& report_id <= data->T33_reportid_max) {
+		/* Handle live diagnoistic messages */
+		mxt_proc_t33_messages(data, message);	
 	} else if (report_id == data->T48_reportid_min) {
 		mxt_proc_t48_messages(data, message);
 	} else if (!data->input_dev) {
@@ -1903,6 +2143,9 @@ static int mxt_process_messages_until_invalid(struct mxt_data *data)
 		if (read < count)
 			return 0;
 	} while (--tries);
+
+	dev_info(dev, "What is read %d\n", read);
+	dev_info(dev, "What is count %d\n", count);
 
 	if (data->update_input || data->update_input_sec ) {
 		mxt_input_sync(data);
@@ -2801,6 +3044,24 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			data->T27_reportid_min = min_id;
 			data->T27_reportid_max = max_id;
 			break;
+		case MXT_SPT_T33:
+			data->T33_address = object->start_address;
+			data->T33_reportid_min = min_id;
+			data->T33_reportid_max = max_id;
+			data->T33_msg_size = mxt_obj_size(object);
+			data->T33_instances = mxt_obj_instances(object);
+			data->T33_num_touchids = object->num_report_ids;
+
+			data->t33_msg_buf = kcalloc(data->T33_instances,
+						data->T5_msg_size, GFP_KERNEL);
+
+			if (!data->t33_msg_buf)
+				return -ENOMEM;
+
+			break;
+		case MXT_SPT_T36:
+			data->T36_address = object->start_address;
+			break;
 		case MXT_PROCI_TOUCHSUPPRESSION_T42:
 			data->T42_reportid_min = min_id;
 			data->T42_reportid_max = max_id;
@@ -2901,6 +3162,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 
 	data->msg_buf = kcalloc(data->max_reportid,
 				data->T5_msg_size, GFP_KERNEL);
+
 	if (!data->msg_buf)
 		return -ENOMEM;
 
@@ -3654,6 +3916,9 @@ static int mxt_initialize_input_device(struct mxt_data *data)
 				     MXT_DISTANCE_ACTIVE_TOUCH,
 				     MXT_DISTANCE_HOVERING,
 				     0, 0);
+
+		input_set_abs_params(input_dev, ABS_MISC, 
+					0, MXT_STATUS_MAX_VALUE, 0, 0);
 	}
 
 	input_set_abs_params(input_dev, ABS_MT_POSITION_X,
@@ -3776,6 +4041,10 @@ static int mxt_initialize(struct mxt_data *data)
 		if (error) 
 			dev_err(&client->dev, "RETRIGEN Not Enabled or unavailable\n");
 	}
+
+	/* Initialize the crc8 ld table */
+
+	__mxt_calc_crc8_init(data);
 
 	error = mxt_acquire_irq(data);
 	if (error)
@@ -4537,6 +4806,44 @@ static int mxt_check_firmware_format(struct device *dev,
 	return -EINVAL;
 }
 
+static ssize_t mxt_diagnostic_msg_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	struct mxt_object *object;
+	int count = 0;
+	int i;
+	u8 *obuf;
+
+	obuf = kmalloc(50, GFP_KERNEL);
+
+	object = mxt_get_object(data, MXT_SPT_T33);
+
+	if (object) {
+		/* Pre-allocate buffer large enough to hold max sized object. */
+
+		if (!obuf)
+			return -ENOMEM;
+
+		for (i = 0; i <= 40; i++) {
+
+			if (i < 40)
+				count += scnprintf(buf + count, PAGE_SIZE - count,
+					"%x, ", data->t33_msg_buf[i]);
+
+			if (i == 40)
+				count += scnprintf(buf + count, PAGE_SIZE - count,
+					"%x\n", data->t33_msg_buf[i]);
+		}
+	} else {
+
+		count = scnprintf(buf, PAGE_SIZE, "Diagnostic data not available\n");
+	}
+
+	kfree(obuf);
+	return count;
+}
+
 static int mxt_load_fw(struct device *dev, const char *fn)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -4991,6 +5298,7 @@ static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
 static DEVICE_ATTR(tx_seq_num, S_IWUSR | S_IRUSR, mxt_tx_seq_number_show,
 		   mxt_tx_seq_number_store);
 static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
+static DEVICE_ATTR(diagnostic_msg, S_IRUGO, mxt_diagnostic_msg_show, NULL);
 static DEVICE_ATTR(update_cfg, S_IWUSR, NULL, mxt_update_cfg_store);
 static DEVICE_ATTR(config_crc, S_IRUGO, mxt_config_crc_show, NULL);
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, mxt_update_fw_store);
@@ -5008,6 +5316,7 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
 	&dev_attr_tx_seq_num.attr,
+	&dev_attr_diagnostic_msg.attr,
 	&dev_attr_debug_irq.attr,
 	&dev_attr_crc_enabled.attr,
 	&dev_attr_object.attr,

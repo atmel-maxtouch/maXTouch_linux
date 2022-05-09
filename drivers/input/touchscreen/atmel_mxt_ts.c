@@ -2283,7 +2283,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 				cfg->raw_pos += offset;
 
 				/* Adjust byte_offset for skipped objects */
-				cfg->object_skipped_ofs = cfg->object_skipped_ofs + 1;;
+				cfg->object_skipped_ofs = cfg->object_skipped_ofs + 1;
 
 				/* Adjust config memory size, less to program */
 				/* Only for non-volatile T objects */
@@ -2323,6 +2323,10 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 		reg = object->start_address + mxt_obj_size(object) * instance;
 
+		/* Synchronize write offset with byte_offset in cfg->mem */
+		/* Add to support missing objects within config raw file */
+		write_offset = reg - cfg->start_ofs - cfg->object_skipped_ofs;
+
 		for (i = 0; i < size; i++) {
 			ret = sscanf(cfg->raw + cfg->raw_pos, "%hhx%n",
 				     &val,
@@ -2351,7 +2355,6 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 		totalBytesToWrite = size;
 
-
 		/* Write per object per instance per obj_size w/data in cfg.mem */
 		while (totalBytesToWrite > 0) {
 
@@ -2372,11 +2375,11 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 			write_offset = write_offset + size;
 			totalBytesToWrite = totalBytesToWrite - size;
-		}
+		} /* End of while - write routine */
 
 		msleep(20);
 
-	} /* End of while loop */
+	} /* End of while - parse of raw file */
 
 	return 0;
 }
@@ -2553,9 +2556,14 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 						   crc_start - cfg.start_ofs - cfg.object_skipped_ofs,
 						   cfg.mem_size);
 
-		if (config_crc > 0 && config_crc != calculated_crc)
+		if (config_crc > 0 && config_crc != calculated_crc) {
 			dev_warn(dev, "Config CRC in file inconsistent, calculated=%06X, file=%06X\n",
 				 calculated_crc, config_crc);
+
+			if (cfg.object_skipped_ofs > 0) {
+			dev_warn(dev, "Objects missing from config file, calculated CRC may be invalid\n");
+			}
+		}
 	}
 
 	msleep(50);	//Allow delay before issuing backup and reset
@@ -4765,11 +4773,6 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 		dev_info(dev, "Found configuration file: %s\n",
 			MXT_CFG_NAME);
 	}
-
-	error = mxt_clear_cfg(data);
-
-	if (error)
-		dev_err(dev, "Failed clear configuration\n");
 
 	//Captures messages in buffer left over from clear_cfg()
 	error = mxt_process_messages_until_invalid(data);

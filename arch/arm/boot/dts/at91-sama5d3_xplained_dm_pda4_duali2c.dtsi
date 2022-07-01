@@ -47,6 +47,16 @@
 	ahb {
 		apb {
 			i2c1: i2c@f0018000 {
+			
+				qt1070: keyboard@1b {
+					compatible = "qt1070";
+					reg = <0x1b>;
+					interrupt-parent = <&pioE>;
+					interrupts = <8 0x0>;
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_qt1070_irq>;
+					wakeup-source;
+				};
 				
 				mchp_3d_i2c@42 {
 					compatible = "microchip,mchp_3d_i2c";
@@ -61,11 +71,24 @@
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4a>;
 					resync-enabled;
-					reset-gpios = <&pioE 8 GPIO_ACTIVE_LOW>;
+					reset-gpios = <&pioE 6 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_mxt_irq1 &pinctrl_mxt_rst>;
+				};
+
+			};
+
+			i2c2: i2c@f801c000 {
+				atmel_mxt_ts@4c {
+					compatible = "atmel,atmel_mxt_ts";
+					reg = <0x4c>;
+					resync-enabled;
+					interrupt-parent = <&pioE>;
+					interrupts = <8 0x2>;	/* Falling edge only */
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_mxt_irq2>;
 				};
 
 			};
@@ -97,6 +120,11 @@
 					pinctrl_mxt_irq1: mxt_irq1 {
 						atmel,pins =
 							<AT91_PIOE 7 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
+					};
+
+					pinctrl_mxt_irq2: mxt_irq2 {
+						atmel,pins =
+							<AT91_PIOE 8 AT91_PERIPH_GPIO AT91_PINCTRL_PULL_UP_DEGLITCH>;
 					};
 
 					pinctrl_mxt_rst: mxt_rst {

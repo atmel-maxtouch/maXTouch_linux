@@ -125,6 +125,11 @@
 #define MXT_PROCG_IGNORENODES_T141		   141
 #define MXT_SPT_MESSAGECOUNT_T144		   144
 #define MXT_SPT_IGNORENODESCONTROL_T145		   145
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+#define MXT_PROCI_SHAPESEARCH_T150		   150
+#define MXT_SPT_WIDGET_T152			   152
+#define MXT_SPT_WIDGET_TT53			   153
+#endif
 
 /* MXT_GEN_MESSAGE_T5 object */
 #define MXT_RPTID_NOMSG		0xff
@@ -230,6 +235,52 @@ struct t37_debug {
 /* Define for MXT_PROCI_TOUCHSUPPRESSION_T42 */
 #define MXT_T42_MSG_TCHSUP	BIT(0)
 
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+
+/* T152 Message Types */
+#define MXT_CODED_KNOB		0x01
+#define MXT_BUTTON_KNOB		0x02
+#define MXT_POSITION_KNOB	0x03
+
+/* T152 State Codes */
+#define MXT_KNOB_DORMANT	0x00
+#define MXT_KNOB_TOUCHED	0x01
+#define MXT_KNOB_PUSHED		0x02
+
+/* T152 Widget Object */
+#define MXT_T152_ENABLE		0x00
+#define MXT_T152_MAXDETENT	0x0a
+
+/* T152 Knob masks */
+#define MXT_KNOB_TYPE_MASK	0x07
+#define MXT_KNOB_STATE_MASK	0xc0
+#define MXT_KNOB_EVENT_MASK	0x07
+#define MXT_KNOB_ERR_MASK	0x38
+
+/* T152 KNOB Events */
+#define MXT_BTN_NOEVENT		0x00
+#define MXT_BTN_TOUCHED 	0x02
+#define MXT_BTN_PUSHED		0x04
+#define MXT_BTN_UNTOUCH		0x05
+#define MXT_BTN_UNPUSH		0x06
+
+/* T152 Position Events */
+#define MXT_POS_NOEVENT		0x00
+#define MXT_POS_MOVE		0x01
+#define MXT_POS_TOUCH		0x02
+#define MXT_POS_PUSH_MOVE	0x03
+#define MXT_POS_PUSH 		0x04
+#define MXT_POS_UNTOUCH		0x05
+#define MXT_POS_UNPUSH		0x06
+#define MXT_POS_OTHER		0x07
+
+/* T152 Knob Error Codes */
+#define MXT_KNOB_NO_ERROR	0x00
+#define MXT_NOTOUCH_PAD		0x01
+#define MXT_PAD_POS_ERR		0x02
+#define MXT_INIT_ERR		0x07
+#endif
+
 /* T100 Multiple Touch Touchscreen */
 #define MXT_T100_CTRL		0
 #define MXT_T100_CFG1		1
@@ -326,6 +377,18 @@ struct mxt_info {
 	u8 object_num;
 };
 
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+static const signed short knob_btns[] = {
+	BTN_0, BTN_1,	/* Center button, pre-define two buttons */	
+	-1 				/* terminating entry */
+};					/* BTN_0 - Knob 0, BTN_1 - Knob 1 */
+
+static const signed short dial_btns[] = {
+	BTN_A, BTN_B, 	/* Pre-define two dial push buttons */
+	-1				/* terminating entry */
+};					/* BTN_A - Knob 0, BTN_B - Knob 1 */
+#endif
+
 struct mxt_object {
 	u8 type;
 	u16 start_address;
@@ -405,6 +468,10 @@ struct mxt_data {
 	struct i2c_client *client;
 	struct input_dev *input_dev;
 	struct input_dev *input_dev_sec;
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+	struct input_dev *input_dev_knob;
+	struct input_dev *input_dev_sec_knob;
+#endif
 	char phys[64];		/* device physical location */
 	struct mxt_object *object_table;
 	struct mxt_info *info;
@@ -505,10 +572,18 @@ struct mxt_data {
 	u8 T129_reportid_min;
 	u8 T133_reportid_min;
 	u16 T144_address;
-	
+
 	/* Cached instance parameter */
 	u8 T100_instances;
 	u8 T15_instances;
+
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+	u16 T152_address;
+	u8 T152_reportid_min;
+	u8 T152_reportid_max;
+	u8 T152_instances;
+	u8 T152_obj_size;
+#endif
 
 	/* for fw update in bootloader */
 	struct completion bl_completion;
@@ -1716,7 +1791,154 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 	} else {
 		data->update_input = true;
 	}
+}	
+
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+static void mxt_proc_t152_messages(struct mxt_data *data, u8 *message) 
+{
+	struct device *dev = &data->client->dev;
+	struct input_dev *input_dev_knob = data->input_dev_knob;
+	struct input_dev *input_dev_sec_knob = data->input_dev_sec_knob;
+	u8 knob_state = MXT_KNOB_DORMANT;
+	int id = 0;
+	u8 msg_type = 0;
+	u16 abs_pos;
+	int pos_chg;
+	u8 grads;
+	u8 pad_ampl;
+	u8 push_ampl;
+
+	u8 knob_err = 0; 
+	u8 knob_event = 0;
+	u16 button_state = 0;
+	bool knob_pushed = false;
+
+	/* Determine id  and msg type of knob message */
+	id = (message[0] - data->T152_reportid_min);
+	msg_type = message[1] & MXT_KNOB_TYPE_MASK;
+	knob_state = ((message[2] & MXT_KNOB_STATE_MASK) >> 6);
+	knob_event = message[2] & MXT_KNOB_EVENT_MASK;
+	knob_err = ((message[2] & MXT_KNOB_ERR_MASK) >> 3);
+
+	dev_dbg(dev,"KoD id = %u msg_type = %u event = %u \n state = %u\n", id, msg_type,
+		knob_event, knob_state);
+
+	switch(msg_type) {
+
+		case MXT_CODED_KNOB:
+			break;
+
+		case MXT_BUTTON_KNOB:
+
+			if (id == 0x02) {	/* Button widget id = 2, redundant? */
+
+				/* Report single pre-defined button */
+				button_state = get_unaligned_le16(&message[5]);
+
+				if ((button_state & BIT(0)) == 0x01) {
+					input_report_key(input_dev_knob, knob_btns[0], 1);
+				} else {
+					input_report_key(input_dev_knob, knob_btns[0], 0);
+				}
+
+				input_sync(input_dev_knob);
+
+				if ((button_state & BIT(1)) == 0x02) {
+					input_report_key(input_dev_sec_knob, knob_btns[1], 1);
+				} else {
+					input_report_key(input_dev_sec_knob, knob_btns[1], 0);
+				}
+
+				input_sync(input_dev_sec_knob);
+			}
+
+			break;
+
+		case MXT_POSITION_KNOB:
+
+			pos_chg = get_unaligned_le16(&message[3]);
+			abs_pos = get_unaligned_le16(&message[5]);
+			grads = message[7];
+			pad_ampl = message[8];
+			push_ampl = message[9];
+
+			if (id == 0x00) {
+				if (knob_state & (MXT_POS_TOUCH | MXT_POS_MOVE |
+					MXT_POS_PUSH_MOVE | MXT_POS_PUSH)) { 
+				
+					input_report_abs(input_dev_knob, ABS_WHEEL, abs_pos);
+		  			input_report_abs(input_dev_knob, ABS_PRESSURE, pad_ampl);
+		  			input_report_rel(input_dev_knob, REL_DIAL, pos_chg);
+		  			input_event(input_dev_knob, EV_MSC, MSC_RAW, grads);
+		  			input_report_key(input_dev_knob, BTN_TOUCH, 1);
+
+		  			if ((knob_state & MXT_POS_PUSH) || (knob_state & MXT_POS_PUSH_MOVE)) {
+		  				input_report_key(input_dev_knob, BTN_A, 1);
+		  				knob_pushed = true;
+		  			}
+
+		  		} else {
+  					dev_dbg(dev, "[%u] knob release\n", id);
+  					input_report_abs(input_dev_knob, ABS_WHEEL, abs_pos);
+		  			input_report_abs(input_dev_knob, ABS_PRESSURE, pad_ampl);
+		  			input_report_rel(input_dev_knob, REL_DIAL, pos_chg);
+		  			input_event(input_dev_knob, EV_MSC, MSC_RAW, grads);
+		  			input_report_key(input_dev_knob, BTN_TOUCH, 0);
+
+		  			if ((knob_state & MXT_POS_UNPUSH) || (knob_pushed == true)) {
+		  				input_report_key(input_dev_knob, BTN_A, 0);
+		  				knob_pushed = false;
+		  			}
+
+				}
+
+				input_report_abs(input_dev_knob, ABS_MISC, knob_err);
+		  		input_sync(data->input_dev_knob);
+		  }
+
+		 if (id == 0x01) {
+			if (knob_state & (MXT_POS_TOUCH | MXT_POS_MOVE | 
+				MXT_POS_PUSH_MOVE | MXT_POS_PUSH)) { 
+				
+				input_report_abs(input_dev_sec_knob, ABS_WHEEL, abs_pos);
+		  		input_report_abs(input_dev_sec_knob, ABS_PRESSURE, pad_ampl);
+		  		input_report_rel(input_dev_sec_knob, REL_DIAL, pos_chg);
+		  		input_event(input_dev_sec_knob, EV_MSC, MSC_RAW, grads);
+		  		input_report_key(input_dev_sec_knob, BTN_TOUCH, 1);
+
+		  		if ((knob_state & MXT_POS_PUSH) || (knob_state & MXT_POS_PUSH_MOVE)) {
+		  			input_report_key(input_dev_sec_knob, BTN_B, 1);
+		  			knob_pushed = true;
+		  		}
+
+		  	} else {
+  				input_report_abs(input_dev_sec_knob, ABS_WHEEL, abs_pos);
+		  		input_report_abs(input_dev_sec_knob, ABS_PRESSURE, pad_ampl);
+		  		input_report_rel(input_dev_sec_knob, REL_DIAL, pos_chg);
+		  		input_event(input_dev_sec_knob, EV_MSC, MSC_RAW, grads);
+		  		input_report_key(input_dev_sec_knob, BTN_TOUCH, 0);
+
+		  		if ((knob_state & MXT_POS_UNPUSH) || (knob_pushed == true)) {
+		  			input_report_key(input_dev_sec_knob, BTN_B, 0);
+		  			knob_pushed = false;
+		  		}
+
+		  		input_report_abs(input_dev_sec_knob, ABS_MISC, knob_err);
+		  	}
+
+			input_report_abs(input_dev_sec_knob, ABS_MISC, knob_err);
+			input_sync(data->input_dev_sec_knob);
+		}
+
+		break;
+
+		default:
+		break;
+
+	}
 }
+
+#endif 
 
 static void mxt_proc_t15_messages(struct mxt_data *data, u8 *msg)
 {
@@ -1867,8 +2089,6 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 
 static void mxt_backup_config(struct mxt_data *data, u8 cmd, u8 value, bool cflag)
 {
-	int error;
-
 	/*
 	 * On failure, CRC is set to 0 and config will always be
 	 * downloaded.
@@ -2091,14 +2311,21 @@ static int mxt_proc_message(struct mxt_data *data, u8 *message)
 	} else if (report_id == data->T19_reportid_min) {
 		mxt_input_button(data, message);
 		data->update_input = true;
-	} else if (report_id >= data->T15_reportid_min
-		   && report_id <= data->T15_reportid_max) {
+	} else if (report_id >= data->T15_reportid_min &&
+		report_id <= data->T15_reportid_max) {
 		mxt_proc_t15_messages(data, message);
 	} else if (report_id == data->T92_reportid_min) {
 		mxt_proc_t92_messages(data, message);
 	} else if (report_id == data->T93_reportid_min) {
 		mxt_proc_t93_messages(data, message);
-	} else {
+	} 
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+	else if (report_id >= data->T152_reportid_min &&
+		report_id <= data->T152_reportid_max) {
+		mxt_proc_t152_messages(data, message);
+	} 
+#endif
+	else {
 		mxt_dump_message(data, message);
 	}
 
@@ -2991,6 +3218,10 @@ static void mxt_free_object_table(struct mxt_data *data)
 	data->T100_reportid_max = 0;
 	data->max_reportid = 0;
 	data->T144_address = 0;
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+	data->T152_reportid_min = 0;
+	data->T152_reportid_max = 0;
+#endif
 }
 
 static int mxt_parse_object_table(struct mxt_data *data,
@@ -3190,6 +3421,15 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			data->crc_err_count = 0x00;
 			dev_info(&client->dev, "CRC enabled\n");
 			break;
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+		case MXT_SPT_WIDGET_T152:
+			data->T152_address = object->start_address;
+			data->T152_reportid_min = min_id;
+			data->T152_reportid_max = max_id;
+			data->T152_instances = num_instances;
+			data->T152_obj_size = mxt_obj_size(object);
+			break;
+#endif
 		}
 
 		end_address = object->start_address
@@ -3876,6 +4116,144 @@ err_free_mem:
 	return error;
 }
 
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+static int mxt_init_knob_input(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	struct input_dev *input_dev_knob;
+	int max_detents = 0;
+	int error;
+	u8 buf = 0;
+
+	input_dev_knob = input_allocate_device();
+		if (!input_dev_knob)
+		return -ENOMEM;
+
+	/* Init the knob center buttons */
+	input_set_capability(input_dev_knob, EV_KEY, knob_btns[0]);	
+
+	/* Init the push knob buttons */
+	input_set_capability(input_dev_knob, EV_KEY, dial_btns[0]);
+
+	/* Read # of detents */
+	error = __mxt_read_reg(data->client, (data->T152_address + MXT_T152_MAXDETENT),
+			1, &buf);
+
+	max_detents = buf;
+
+	dev_dbg(dev, "Max detents found = %d\n", max_detents);
+
+	input_dev_knob->name = "Microchip Knob on Display Device #1";
+	input_dev_knob->phys = data->phys;
+	input_dev_knob->id.bustype = BUS_I2C;
+	input_dev_knob->dev.parent = dev;
+
+	/* bitmap of events supported by device */
+	input_dev_knob->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS) |
+		BIT_MASK(EV_REL);
+	
+	/* Reports Dormant and Touched as Button down or Button up */
+	input_dev_knob->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
+	input_dev_knob->mscbit[0] = BIT_MASK(MSC_RAW);
+
+	input_set_capability(input_dev_knob, EV_ABS, ABS_WHEEL);
+	input_set_capability(input_dev_knob, EV_ABS, ABS_PRESSURE);
+	input_set_capability(input_dev_knob, EV_ABS, ABS_MISC);
+	input_set_capability(input_dev_knob, EV_MSC, MSC_RAW);
+	input_set_capability(input_dev_knob, EV_REL, REL_DIAL);
+
+	input_set_abs_params(input_dev_knob, ABS_WHEEL, 0, (max_detents - 1), 0, 0);
+	input_set_abs_params(input_dev_knob, ABS_PRESSURE, 0, 255, 0, 0);
+	input_set_abs_params(input_dev_knob, ABS_MISC, 0, 8, 0, 0);
+
+	input_set_drvdata(input_dev_knob, data);
+
+	error = input_register_device(input_dev_knob);
+	if (error) {
+		dev_err(dev, "Error %d registering input device\n", error);
+		goto err_free_mem_knob;
+	}
+
+	data->input_dev_knob = input_dev_knob;
+
+	return 0;
+
+err_free_mem_knob:
+	input_free_device(input_dev_knob);
+	return error;
+}
+#endif
+
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+static int mxt_init_sec_knob_input(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	struct input_dev *input_dev_sec_knob;
+	int max_detents = 0;
+	u8 detent_ofs = 0;
+	int error;
+	u8 buf = 0;
+
+	input_dev_sec_knob = input_allocate_device();
+		if (!input_dev_sec_knob)
+		return -ENOMEM;
+
+	/* Init the knob center buttons */
+	input_set_capability(input_dev_sec_knob, EV_KEY, knob_btns[1]);	
+
+	/* Init the push knob buttons */
+	input_set_capability(input_dev_sec_knob, EV_KEY, dial_btns[1]);
+
+	detent_ofs = data->T152_obj_size + MXT_T152_MAXDETENT;
+
+	error = __mxt_read_reg(data->client, (data->T152_address + detent_ofs),
+			1, &buf);
+
+	max_detents = buf;
+
+	dev_dbg(dev, "Max detents found = %d\n", max_detents);
+
+	input_dev_sec_knob->name = "Microchip Knob on Display Device #2";
+	input_dev_sec_knob->phys = data->phys;
+	input_dev_sec_knob->id.bustype = BUS_I2C;
+	input_dev_sec_knob->dev.parent = dev;
+
+	/* bitmap of events supported by device */
+	input_dev_sec_knob->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS) |
+		BIT_MASK(EV_REL);
+	
+	/* Reports Dormant and Touched as Button down or Button up */
+	input_dev_sec_knob->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
+	input_dev_sec_knob->mscbit[0] = BIT_MASK(MSC_RAW);
+
+	input_set_capability(input_dev_sec_knob, EV_ABS, ABS_WHEEL);
+	input_set_capability(input_dev_sec_knob, EV_ABS, ABS_PRESSURE);
+	input_set_capability(input_dev_sec_knob, EV_ABS, ABS_MISC);
+	input_set_capability(input_dev_sec_knob, EV_MSC, MSC_RAW);
+	input_set_capability(input_dev_sec_knob, EV_REL, REL_DIAL);
+
+	input_set_abs_params(input_dev_sec_knob, ABS_WHEEL, 0, (max_detents - 1), 0, 0);
+	input_set_abs_params(input_dev_sec_knob, ABS_PRESSURE, 0, 255, 0, 0);
+	input_set_abs_params(input_dev_sec_knob, ABS_MISC, 0, 8, 0, 0);
+
+	input_set_drvdata(input_dev_sec_knob, data);
+
+	error = input_register_device(input_dev_sec_knob);
+	if (error) {
+		dev_err(dev, "Error %d registering input device\n", error);
+		goto err_free_mem_knob;
+	}
+
+	data->input_dev_sec_knob = input_dev_sec_knob;
+
+	return 0;
+
+err_free_mem_knob:
+	input_free_device(input_dev_sec_knob);
+	return error;
+}
+#endif
+
 static int mxt_initialize_input_device(struct mxt_data *data)
 {
 	struct device *dev = &data->client->dev;
@@ -4090,7 +4468,7 @@ static int mxt_initialize(struct mxt_data *data)
 
 #ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
 		__mxt_calc_crc8_init(data);
-		
+
 	if (data->T33_address) {
 		if (!data->crc_enabled)
 			__mxt_read_reg(client, data->T33_address + MXT_T33_CTRL,
@@ -4131,11 +4509,31 @@ static int mxt_initialize(struct mxt_data *data)
 			dev_info(&client->dev, "mxt_init: Registering devices\n");
 			error = mxt_initialize_input_device(data);
 
-			data->irq_processing = true;
-
 			if (error)
 				return error;
-			
+
+			data->irq_processing = true;
+
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+
+			if (data->T152_address) {
+				dev_info(&client->dev, "Initializing Knobs on Display Device\n");
+
+				error = mxt_init_knob_input(data);
+
+				if (error) {
+					dev_warn(&client->dev, "Error %d, registering Knob device\n",
+						error);
+				}
+
+				error = mxt_init_sec_knob_input(data);
+
+				if (error) {
+					dev_warn(&client->dev, "Error %d, registering Knob device\n",
+						error);
+				}
+			}
+#endif
 			if (data->T100_instances > 1) {
 			    error = mxt_init_secondary_input(data);
 			    if (error)
@@ -4690,11 +5088,33 @@ static int mxt_configure_objects(struct mxt_data *data,
 
 	if (data->system_power_up && !(data->sysfs_updating_config_fw)) {
 		if (data->multitouch) {
+
 			dev_info(dev, "mxt_config: Registering devices\n");
 			error = mxt_initialize_input_device(data);
 			if (error)
 				return error;
-			
+
+#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
+			if (data->T152_address) {
+				dev_info(dev, "Initializing Knob on Display Device #1\n");
+
+				error = mxt_init_knob_input(data);
+				if (error) {
+					dev_warn(dev, "Error %d, registering Knob device\n",
+						error);
+				}
+				
+				dev_info(dev, "Initializing Knob on Display Device #2\n");
+
+				error = mxt_init_sec_knob_input(data);
+				if (error) {
+					dev_warn(dev, "Error %d, registering Knob device\n",
+						error);
+				}
+			} else {
+				dev_warn(dev, "No knob object detected\n");
+			}
+#endif
 			if (data->T100_instances > 1) {
 			    error = mxt_init_secondary_input(data);
 			    if (error)

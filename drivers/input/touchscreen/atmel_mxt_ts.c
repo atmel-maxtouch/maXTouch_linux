@@ -15,6 +15,9 @@
  *
  */
 
+#define DRIVER_VERSION_NUMBER "4.19-20220815"
+
+#include <linux/version.h>
 #include <linux/acpi.h>
 #include <linux/dmi.h>
 #include <linux/module.h>
@@ -45,7 +48,9 @@
 
 /* Configuration file */
 #define MXT_CFG_NAME		"maxtouch.cfg"
-#define MXT_CFG_MAGIC		"OBP_RAW V1"
+#define MXT_CFG_MAGIC_V1	"OBP_RAW V1"
+#define MXT_CFG_MAGIC_V2	"OBP_RAW V2"
+#define MXT_CFG_MAGIC_V3	"OBP_RAW V3"
 
 /* Registers */
 #define MXT_OBJECT_START	0x07
@@ -149,6 +154,44 @@
 #define MXT_T6_STATUS_CAL	BIT(4)
 #define MXT_T6_STATUS_CFGERR	BIT(3)
 #define MXT_T6_STATUS_COMSERR	BIT(2)
+
+/* Define for T68 Error Status byte */
+#define MXT_T68_SUCCESS			0x00
+#define MXT_T68_OUTOFSYNC		0x01
+#define MXT_T68_DTYPE_NOTSUP		0x02
+#define MXT_T68_LEN_EXCEEDED		0x03
+#define MXT_T68_INVALID_NUM_BYTES	0x04
+#define MXT_T68_INVALID_DATA		0x05
+#define MXT_T68_INCOMPLETE_ERR		0x06
+
+/* T68 datatype definitions */
+#define T68_PDS_DTYPE		0x0005
+#define T68_ENC_DTYPE		0x000C
+#define T68_PWM_DTYPE		0x000A
+#define T68_EDGE_SHAPE_DTYPE	0x000B
+
+/* T68 Bit definitions */
+#define T68_CTRL_ENABLE			BIT(0)
+#define T68_CTRL_RPTEN			BIT(1)
+
+/* T68 definitions */
+#define T68_CTRL_OFFSET			0
+#define T68_DTYPE_OFFSET		3
+#define T68_LENGTH_OFFSET		5
+#define T68_DATA_OFFSET			6
+#define T68_CMD_OFFSET			70
+#define MXT_T68_TIMEOUT			100
+
+/* T68 cmd definitions */
+#define T68_CMD_NONE 		0
+#define T68_CMD_START		1
+#define T68_CMD_CONTINUE	2
+#define T68_CMD_END		3
+
+#define MIN(a,b) \
+   ({ __typeof__ (a) _a = (a); \
+       __typeof__ (b) _b = (b); \
+           _a < _b ? _a : _b; })
 
 #ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
 
@@ -521,6 +564,20 @@ struct mxt_data {
 	u8 crc_err_count;
 	bool is_resync_enabled;
 
+	/* T68 variables */	
+	u8 *t68_buf;
+	u16 t68_cmd_addr;
+	u32 t68_payload_crc;
+	u8 t68_datasize;
+	u16 t68_datatype;
+	u32 t68_checksum;
+	u32 t68_checksum2;
+	u16 t68_length;
+	bool t68_last_frame;
+
+	/* Encryption Parameters */
+	u8 encr_blocksize;
+
 	/* Cached parameters from object table */
 	u16 T5_address;
 	u8 T5_msg_size;
@@ -552,6 +609,8 @@ struct mxt_data {
 	u8 T61_reportid_max;
 	u8 T65_reportid_min;
 	u8 T65_reportid_max;
+	u16 T68_address;
+	u8 T68_obj_size;
 	u8 T68_reportid_min;
 	u8 T70_reportid_min;
 	u8 T70_reportid_max;
@@ -593,6 +652,9 @@ struct mxt_data {
 
 	/* for config update handling */
 	struct completion crc_completion;
+
+	/* t68 message handling */
+	struct completion t68_completion;
 
 	u32 *t19_keymap;
 	unsigned int t19_num_keys;
@@ -875,6 +937,44 @@ static u8 mxt_update_seq_num(struct mxt_data *data, bool reset_counter, u8 count
 	return current_val;
 }
 
+static bool mxt_lookup_chips(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	u8 family_id;
+	u8 variant_id;
+	bool is_chip_found = false;
+	
+	if (!data->info) {
+		return false;
+	}
+	
+	family_id = data->info->family_id;
+	variant_id = data->info->variant_id;
+	
+	switch (family_id) {
+		case 0xA6:
+			is_chip_found = true;
+
+			switch (variant_id) {
+				case 0x14: //"336UD-HA"
+					dev_info(dev, "Found mXT366UD-HA\n");
+					break;
+				case 0x15: //"640UD-HA"
+					dev_info(dev, "Found mXT640UD-HA\n");
+					break;
+				case 0x16: //"448UD-HA"
+					dev_info(dev, "Found mXT448UD-HA\n");
+					break;
+			}
+
+		default:
+		break;
+
+	}
+
+	return is_chip_found;
+}
+
 static int mxt_bootloader_read(struct mxt_data *data,
 			       u8 *val, unsigned int count)
 {
@@ -1147,7 +1247,6 @@ static u8 __mxt_calc_crc8(unsigned char crc, unsigned char data)
 	
 	return crc;
 }
-	
 
 static int __mxt_read_reg(struct i2c_client *client,
 			       u16 reg, u16 len, void *val)
@@ -1430,6 +1529,37 @@ static struct mxt_object *mxt_get_object(struct mxt_data *data, u8 type)
 
 	dev_warn(&data->client->dev, "Invalid object type T%u\n", type);
 	return NULL;
+}
+
+static void mxt_proc_t68_messages(struct mxt_data *data, u8 *msg)
+{
+	struct device *dev = &data->client->dev;
+	u8 err_code = msg[1] & 0x0F;
+	u32 data_crc = msg[2] | (msg[3] << 8) | (msg[4] << 16);
+
+	if (data->t68_last_frame) {
+		if (data_crc != data->t68_payload_crc) {
+			dev_err(dev, "T68 data crc 0x%08X, does not match file CRC 0x%08X\n",
+			data_crc, data->t68_payload_crc);
+		} else {
+			dev_info(dev, "T68 payload and file checksum match = 0x%08X\n", 
+				data_crc);
+		}
+
+		data->t68_last_frame = false;
+	}
+
+	complete(&data->t68_completion);
+
+	dev_info(dev, "T68 Status 0x%02X%s%s%s%s%s%s%s\n",
+		err_code,
+		err_code == MXT_T68_SUCCESS ? " OK" : "",
+		err_code & MXT_T68_OUTOFSYNC ? " Out of sequence error" : "",
+		err_code & MXT_T68_DTYPE_NOTSUP ? " Datatype not supported" : "",
+		err_code & MXT_T68_LEN_EXCEEDED ? " Invalid length" : "",
+		err_code & MXT_T68_INVALID_NUM_BYTES ? " Invalid number of bytes" : "",
+		err_code & MXT_T68_INVALID_DATA ? " Data is invalid" : "",
+		err_code & MXT_T68_INCOMPLETE_ERR ? "  Incomplete action error" : "");
 }
 
 static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
@@ -2296,6 +2426,8 @@ static int mxt_proc_message(struct mxt_data *data, u8 *message)
 #endif
 	else if (report_id == data->T48_reportid_min) {
 		mxt_proc_t48_messages(data, message);
+	} else if (report_id == data->T68_reportid_min) {
+		mxt_proc_t68_messages(data, message);
 	} else if (!data->input_dev) {
 		/*
 		 * Do not report events if input device
@@ -2499,10 +2631,11 @@ static int mxt_process_messages_until_invalid(struct mxt_data *data)
 			data->update_input_sec = false;
 	}
 
-	dev_err(dev, "CHG pin isn't cleared\n");
-	return 0;	// Do not stop system if, make sure RETRIGEN is enabled
-	//return -EBUSY;
-}
+	/* Unread messages in T5 buffer, make sure RETRIGEN is enabled */
+	dev_warn(dev, "CHG pin isn't cleared\n");
+
+	return 0;
+}		
 
 static irqreturn_t mxt_process_messages(struct mxt_data *data)
 {
@@ -2638,9 +2771,8 @@ static void mxt_calc_crc24(u32 *crc, u8 firstbyte, u8 secondbyte)
 	*crc = result;
 }
 
-static u32 mxt_calculate_crc(u8 *base, off_t start_off, off_t end_off)
+static u32 mxt_calculate_crc(u8 *base, off_t start_off, off_t end_off, u32 crc)
 {
-	u32 crc = 0;
 	u8 *ptr = base + start_off;
 	u8 *last_val = base + end_off - 1;
 
@@ -2691,30 +2823,28 @@ static int mxt_check_retrigen(struct mxt_data *data)
 			return error;
 
 		if (val & MXT_COMMS_RETRIGEN) {
-			dev_info(&client->dev, "RETRIGEN enabled\n");
+			dev_info(&client->dev, "RETRIGEN bit already enabled\n");
 			return 0;
+		} else {
+			dev_info(&client->dev, "Enabling RETRIGEN feature\n");
+
+			buff = val | MXT_COMMS_RETRIGEN;
+
+			if (data->crc_enabled){
+	
+				error = __mxt_write_reg_crc(client,
+		        	data->T18_address + MXT_COMMS_CTRL,
+			    	1, &buff, data);
+			} else {
+				error = __mxt_write_reg(client,
+		        	data->T18_address + MXT_COMMS_CTRL,
+			    	1, &buff);
+			}
+
+			if (error)
+	   		return error;	
 		}
 	}
-
-	dev_info(&client->dev, "Enabling RETRIGEN feature\n");
-
-	buff = val | MXT_COMMS_RETRIGEN;
-
-	if (data->crc_enabled){
-	
-		error = __mxt_write_reg_crc(client,
-		        data->T18_address + MXT_COMMS_CTRL,
-			    1, &buff, data);
-	} else {
-		error = __mxt_write_reg(client,
-		        data->T18_address + MXT_COMMS_CTRL,
-			    1, &buff);
-	}
-
-	if (error)
-	   return error;
-
-	dev_info(&client->dev, "RETRIGEN Enabled feature\n");
 	
 	return 0;
 }
@@ -2735,6 +2865,285 @@ static bool mxt_object_is_volatile(struct mxt_data *data, uint16_t object_type)
   	default:
     	return false;
     }	
+}
+
+//******************************************************************************
+/// \brief Check chip is not in deep sleep
+/// \return #mxt_rc
+static int mxt_t68_check_power_cfg(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	uint8_t buf[2];
+	int ret = 0;
+
+	if (!(data->crc_enabled)){
+		ret = __mxt_read_reg(data->client, data->T7_address, sizeof(buf), 
+			&buf);
+		} else {
+			ret = __mxt_read_reg_crc(data->client, data->T7_address, sizeof(buf),
+			&buf, data, true);
+		}
+		if (ret)
+			return ret;
+
+  	dev_info(dev, "T7 IDLEACQINT=%u ACTVACQINT=%u", 
+  		buf[0], buf[1]);
+
+  	if ((buf[0] == 0) || (buf[1] == 0)) {
+    	dev_err(dev, "Error: The chip is in deep sleep" 
+    		"T68 payload cannot be programmed"
+			"Set T7 active and idle to non-zero value and try again");
+
+    	return -EINVAL;
+  	} else {
+    	return 0;
+  	}
+}
+
+static int mxt_t68_enable(struct mxt_data *data) 
+{
+	struct device *dev = &data->client->dev;
+	struct i2c_client *client = data->client;
+	u8 cmd = T68_CTRL_RPTEN | T68_CTRL_ENABLE;
+	int ret = 0;
+
+	dev_info(dev, "Enabling T68 object");
+	dev_dbg(dev, "Writing %u to ctrl register", cmd);
+
+	if (!data->crc_enabled) {
+		ret = __mxt_write_reg(client, data->T68_address + T68_CTRL_OFFSET, 1, 
+			&cmd);
+	} else {
+		ret = __mxt_write_reg_crc(client, data->T68_address + T68_CTRL_OFFSET, 1,
+			&cmd, data);
+	}
+
+	return ret;
+}
+
+static int mxt_t68_write_datatype(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	struct i2c_client *client = data->client;
+
+	u8 buf[2];
+	int ret = 0;
+
+	buf[0] = (data->t68_datatype & 0xFF);
+	buf[1] = (data->t68_datatype & 0xFF00) >> 8;
+
+	dev_info(dev, "Writing %u to DATATYPE register\n", 
+		data->t68_datatype);
+	
+	if (!data->crc_enabled) {
+		ret = __mxt_write_reg(client, data->T68_address + T68_DTYPE_OFFSET,
+			sizeof(buf), &buf); 
+	} else {
+		ret = __mxt_write_reg_crc(client, data->T68_address + T68_DTYPE_OFFSET,
+			sizeof(buf), &buf, data);
+	}
+
+	return ret;
+}
+
+static int mxt_t68_write_length(struct mxt_data *data, u16 length)
+{
+	struct device *dev = &data->client->dev;
+	struct i2c_client *client = data->client;
+	int ret = 0;
+
+	dev_dbg(dev, "Writing LENGTH=%u", length);
+
+	if (!data->crc_enabled) {
+		ret = __mxt_write_reg(client, data->T68_address + T68_LENGTH_OFFSET,
+			1, &length); 
+	} else {
+		ret = __mxt_write_reg_crc(client, data->T68_address + T68_LENGTH_OFFSET,
+			1, &length, data);
+	}
+
+	return ret;
+}
+
+static int mxt_t68_command(struct mxt_data *data, u8 cmd)
+{
+	struct device *dev = &data->client->dev;
+	struct i2c_client *client = data->client;
+  	int ret = 0;
+
+  	dev_dbg(dev, "Writing 0x%02X to CMD register", cmd);
+
+	if (!data->crc_enabled) {
+		ret = __mxt_write_reg(client, data->T68_address + T68_CMD_OFFSET,
+			1, &cmd); 
+	} else {
+		ret = __mxt_write_reg_crc(client, data->T68_address + T68_CMD_OFFSET,
+			1, &cmd, data);
+	}
+
+  	if (ret){
+  		dev_err(dev, "Write CMD register failed\n");
+		return ret;
+  	}
+
+  	reinit_completion(&data->t68_completion);
+
+  	mxt_wait_for_completion(data, &data->t68_completion, MXT_T68_TIMEOUT);
+
+  	return ret;
+}
+
+static int mxt_t68_send_frames(struct mxt_data *data)
+{
+	struct device *dev = &data->client->dev;
+	struct i2c_client *client = data->client;
+	size_t offset = 0;
+	u8 frame_size;
+	int frame = 1;
+	u32 temp_crc = 0;
+	u8 cmd = T68_CMD_NONE;
+	int ret = 0;
+
+	while (cmd != T68_CMD_END) {
+		/* Limit size to T68 data size */
+		frame_size = MIN(data->t68_length - offset, data->t68_datasize);
+
+		dev_info(dev, "Writing frame %u, %u bytes", frame, frame_size);
+
+		/* Write and calculate data only if frame_size > 0 */
+		if (frame_size > 0) {
+
+			/* Accumulate CRC per frame */
+			temp_crc = mxt_calculate_crc((data->t68_buf + offset), 0, frame_size, data->t68_checksum);
+
+			/* Update T68 checksum for each frame written */
+			data->t68_checksum = temp_crc;
+
+			dev_dbg(dev, "Calcuted CRC for frame [%d] = %08X", data->t68_checksum, frame);
+
+			if (!data->crc_enabled) {
+				ret = __mxt_write_reg(client, data->T68_address + T68_DATA_OFFSET,
+					frame_size, (data->t68_buf + offset)); 
+			} else {
+				ret = __mxt_write_reg_crc(client, data->T68_address + T68_DATA_OFFSET,
+					frame_size, (data->t68_buf + offset), data);
+			}
+
+			if (ret) {
+				dev_err(dev, "Write frames failed\n");
+				return ret;
+			}
+		}
+
+		/* Always update length before sending command, even if 0*/
+		ret = mxt_t68_write_length(data, frame_size);
+		
+		if (ret) {
+			dev_err(dev, "Write t68 length failed\n");
+			return ret;
+		}
+		
+		if (frame == 1) {
+			cmd = T68_CMD_START;
+		}
+		else if (offset >= data->t68_length) {
+			cmd = T68_CMD_END;
+			data->t68_last_frame = true;
+		}
+		else {
+			cmd = T68_CMD_CONTINUE;
+		}
+
+		offset += frame_size;
+
+		ret = mxt_t68_command(data, cmd);
+		if (ret) {
+			dev_err(dev, "Write t68 command failed\n");
+		}
+
+		frame++;
+	}
+
+	return 0;
+}
+
+//******************************************************************************
+/// \brief Zero entire T68 object
+/// \return #mxt_rc
+static int mxt_t68_zero_data(struct mxt_data *data)
+{
+  struct device *dev = &data->client->dev;
+  struct i2c_client *client = data->client;
+
+  u8 zeros[64];
+  int ret = 0;
+
+  dev_dbg(dev, "Zeroing T68 DATA");
+
+  memset(&zeros, 0, sizeof(zeros));
+
+	if (!data->crc_enabled) {
+		ret = __mxt_write_reg(client, data->T68_address + T68_DATA_OFFSET,
+			sizeof(zeros), zeros); 
+	} else {
+		ret = __mxt_write_reg_crc(client, data->T68_address + T68_DATA_OFFSET,
+			sizeof(zeros), zeros, data);
+	}
+
+	return ret;
+}
+
+static int mxt_upload_t68_payload(struct mxt_data *data, struct mxt_cfg *cfg)
+{
+	struct device *dev = &data->client->dev;
+	struct mxt_object *object;
+	int ret = 0;
+
+	dev_info(dev, "Checking T7 Power Config");
+	ret = mxt_t68_check_power_cfg(data);
+	if (ret)
+    	return ret;
+
+	/* Check for existence of T68 object */
+	object = mxt_get_object(data, MXT_SPT_SERIALDATACOMMAND_T68);
+	if (!object) {
+		dev_err(dev, "T68 object does not exist");
+		return -EINVAL;
+	}
+
+  	/* Calculate position of CMD register */
+  	data->t68_cmd_addr = data->T68_address + data->T68_obj_size - 3;
+
+	/* Calculate frame size */
+	data->t68_datasize = data->T68_obj_size - 9;
+	
+  	ret = mxt_t68_enable(data);
+  	if (ret)
+    	goto release;
+
+  	ret = mxt_t68_zero_data(data);
+  	if (ret)
+    	goto release;
+
+  	ret = mxt_t68_write_datatype(data);
+  	if (ret)
+    	goto release;
+
+  	dev_info(dev, "Sending data");
+  	ret = mxt_t68_send_frames(data);
+  	if (ret) {
+    	dev_err(dev, "Error sending data");
+    	goto release;
+  	}
+
+  	dev_info(dev, "Done");
+  	ret = 0;
+
+	release:
+  	
+  	kfree(data->t68_buf);
+
+  	return ret;
 }
 
 static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
@@ -2784,6 +3193,46 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 				cfg->mem_size = cfg->mem_size - cfg->object_skipped_ofs;
 			}
+		}
+
+		if (type == MXT_SPT_SERIALDATACOMMAND_T68 &&
+				(instance & 0x8000)) {
+
+				data->t68_datatype = (instance & 0x000F);
+
+				/* Allocate data to struct first */
+				data->t68_buf = kzalloc((size + 1), GFP_KERNEL);
+				if(!data->t68_buf)
+					return -ENOMEM;
+
+				/* remove checksum from length or status returns 0x04*/
+				data->t68_length = size - 4;
+
+				/* use object_size to load buffer, incl payload CRC */
+				for (i = 0; i < size; i++) {
+					ret = sscanf(cfg->raw + cfg->raw_pos, "%hhx%n",
+						&val, &offset);
+					if (ret != 1) {
+						dev_err(dev, "Cannot read T%d data at byte %d\n",
+							type, i);
+						return -EINVAL;
+					}
+
+					*(data->t68_buf + i) = val;
+
+					cfg->raw_pos += offset;
+				}
+
+				/* Capture payload CRC in file */
+				data->t68_payload_crc = ((data->t68_buf[size-4] << 24) |
+					(data->t68_buf[size-3] << 16) | (data->t68_buf[size-2] << 8) |
+					(data->t68_buf[size-1]));
+
+				dev_info(dev, "T68_payload_crc from file = %08X", data->t68_payload_crc);
+
+				error = mxt_upload_t68_payload(data, cfg);
+
+				continue;
 		}
 
 		if(!object || (mxt_object_is_volatile(data, type))) {
@@ -2930,9 +3379,15 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	struct device *dev = &data->client->dev;
 	struct mxt_cfg cfg;
 	u32 info_crc, config_crc, calculated_crc;
+	int cfg_version = 0;
+	int cfg_blksize = 0;
+	u8 packet_size = 16;
+	int cfg_enc = 0;
+	char tmp[255];
 	u16 crc_start = 0;
-	int ret, error;
 	int offset;
+	int error;
+	int ret = 0;
 	int i;
 
 	/* Make zero terminated copy of the OBP_RAW file */
@@ -2947,15 +3402,58 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	//Clear messages after update in cases /CHG low
 	error = mxt_process_messages_until_invalid(data);
 	if (error)
-		dev_dbg(dev, "Unable to read CRC\n");
+		dev_dbg(dev, "Unable to read all messages.\n");
 
-	if (strncmp(cfg.raw, MXT_CFG_MAGIC, strlen(MXT_CFG_MAGIC))) {
+	if (!strncmp(cfg.raw, MXT_CFG_MAGIC_V1, strlen(MXT_CFG_MAGIC_V1))) {
+		dev_info(dev, "Found V1 config file\n");
+		cfg_version = 0x01;
+		cfg.raw_pos = strlen(MXT_CFG_MAGIC_V1);
+	} else if (!strncmp(cfg.raw, MXT_CFG_MAGIC_V2, strlen(MXT_CFG_MAGIC_V2))) {
+		dev_info(dev, "Found V2 config file\n");
+		cfg_version = 0x02;
+		cfg.raw_pos = strlen(MXT_CFG_MAGIC_V2);
+	} else if (!strncmp(cfg.raw, MXT_CFG_MAGIC_V3, strlen(MXT_CFG_MAGIC_V3))) {
+		dev_info(dev, "Found V3 config file\n");
+		cfg_version = 0x03;
+		cfg.raw_pos = strlen(MXT_CFG_MAGIC_V3);
+	} else {
 		dev_err(dev, "Unrecognised config file\n");
 		ret = -EINVAL;
 		goto release_raw;
 	}
 
-	cfg.raw_pos = strlen(MXT_CFG_MAGIC);
+	if (cfg_version == 0x03) {
+		if (sscanf(cfg.raw + cfg.raw_pos, "%s%d%n", tmp, &cfg_enc, &offset) != 2) {
+			dev_err(dev, "Failed to get encryption state\n");
+			goto release_raw;
+		}
+
+		if (!(strcmp("ENCRYPTION ", tmp))) {
+			dev_err(dev, "ENCRYPTION header not found");
+			goto release_raw;
+		}
+
+		cfg.raw_pos += offset;
+		
+		if (sscanf(cfg.raw + cfg.raw_pos, "%s%d%n", tmp, &cfg_blksize, &offset) != 2) {
+			dev_err(dev, "Failed to get encryption block \n");
+		}
+
+		if (!(strcmp("MAX_ENCRYPTION_BLOCKS ",tmp))) {
+			dev_err(dev, "MAX ENCRYPTION BLOCK header not found");
+			goto release_raw;
+		}
+	
+		if (cfg_enc == 0x01) {
+				dev_err(dev, "Cannot program encrypted cfg into unencrypted device\n");
+				ret = -EINVAL;
+				goto release_raw;
+		}
+
+		cfg.raw_pos += offset;
+
+		data->encr_blocksize = cfg_blksize * packet_size;
+	}
 
 	/* Load 7byte infoblock from config file */
 	for (i = 0; i < sizeof(struct mxt_info); i++) {
@@ -3047,7 +3545,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		goto release_mem;
 	}
 
-	dev_dbg(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
+	dev_info(dev, "update_cfg: cfg.mem_size %i, cfg.start_ofs %i, cfg.raw_pos %lld, offset %i", 
 		cfg.mem_size, cfg.start_ofs, (long long)cfg.raw_pos, offset);
 
 	/* Prepares and programs configuration */
@@ -3074,14 +3572,14 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	if (crc_start > cfg.start_ofs) {
 		calculated_crc = mxt_calculate_crc(cfg.mem,
 						   crc_start - cfg.start_ofs - cfg.object_skipped_ofs,
-						   cfg.mem_size);
+						   cfg.mem_size, 0);
 
 		if (config_crc > 0 && config_crc != calculated_crc) {
 			dev_warn(dev, "Config CRC in file inconsistent, calculated=%06X, file=%06X\n",
 				 calculated_crc, config_crc);
 
 			if (cfg.object_skipped_ofs > 0) {
-			dev_warn(dev, "Objects missing from config file, calculated CRC may be invalid\n");
+				dev_dbg(dev, "Warning: Objects mssing from raw file.\n");
 			}
 		}
 	}
@@ -3263,7 +3761,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			max_id = 0;
 		}
 
-		dev_dbg(&data->client->dev,
+		dev_info(&data->client->dev,
 			"T%u Start:%u Size:%zu Instances:%zu Report IDs:%u-%u\n",
 			object->type, object->start_address,
 			mxt_obj_size(object), mxt_obj_instances(object),
@@ -3354,6 +3852,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			data->T42_reportid_max = max_id;
 			break;
 		case MXT_SPT_MESSAGECOUNT_T44:
+			data->crc_enabled = false;
 			data->T44_address = object->start_address;
 			break;
 		case MXT_SPT_CTECONFIG_T46:
@@ -3375,6 +3874,8 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			break;
 		case MXT_SPT_SERIALDATACOMMAND_T68:
 			data->T68_reportid_min = min_id;
+			data->T68_address = object->start_address;
+			data->T68_obj_size = mxt_obj_size(object);
 			break;
 			case MXT_SPT_DYNAMICCONFIGURATIONCONTROLLER_T70:
 			data->T70_reportid_min = min_id;
@@ -3529,7 +4030,7 @@ static int mxt_resync_comm(struct mxt_data *data)
 
 		data->info_crc = crc_ptr[0] | (crc_ptr[1] << 8) | (crc_ptr[2] << 16);
 
-		calculated_crc = mxt_calculate_crc(dev_id_buf, 0, dev_id_size - MXT_INFO_CHECKSUM_SIZE);
+		calculated_crc = mxt_calculate_crc(dev_id_buf, 0, dev_id_size - MXT_INFO_CHECKSUM_SIZE, 0);
 
 		if (data->info_crc == calculated_crc) {
 			dev_info(&client->dev,
@@ -3591,7 +4092,7 @@ static int mxt_resync_comm(struct mxt_data *data)
 
 				data->info_crc = crc_ptr[0] | (crc_ptr[1] << 8) | (crc_ptr[2] << 16);
 
-				calculated_crc = mxt_calculate_crc(dev_id_buf, 0, dev_id_size - MXT_INFO_CHECKSUM_SIZE);
+				calculated_crc = mxt_calculate_crc(dev_id_buf, 0, dev_id_size - MXT_INFO_CHECKSUM_SIZE,0 );
 
 				if (data->info_crc == calculated_crc) {
 					dev_info(&client->dev,
@@ -3677,9 +4178,8 @@ static int mxt_read_info_block(struct mxt_data *data)
 		 data->info->version >> 4, data->info->version & 0xf,
 		 data->info->build, data->info->object_num);
 	
-	if ((data->info->family_id == 0xA6) && (data->info->variant_id == 0x14)){
-			dev_info(&client->dev, "Found mXT366UD-HA\n");
-	}
+	if (!(mxt_lookup_chips(data)))
+		dev_warn(&client->dev, "Unrecognised device\n");
 
 	/* Resize buffer to give space for rest of info block */
 	num_objects = ((struct mxt_info *)id_buf)->object_num;
@@ -3712,7 +4212,7 @@ static int mxt_read_info_block(struct mxt_data *data)
 	data->info_crc = crc_ptr[0] | (crc_ptr[1] << 8) | (crc_ptr[2] << 16);
 
 	calculated_crc = mxt_calculate_crc(id_buf, 0,
-					   size - MXT_INFO_CHECKSUM_SIZE);
+					   size - MXT_INFO_CHECKSUM_SIZE, 0);
 
 	dev_dbg(&client->dev, "Calculated crc %x\n", calculated_crc);
 
@@ -4018,7 +4518,7 @@ static int mxt_init_secondary_input(struct mxt_data *data)
 	
 	switch (data->multitouch) {
 	case MXT_TOUCH_MULTITOUCHSCREEN_T100:
-		num_mt_slots = data->num_touchids; 
+		num_mt_slots = data->num_touchids;
 		error = mxt_read_t100_config(data, 2);
 		if (error) {
 			dev_info(dev, "Failed to read T100 config\n");
@@ -4433,8 +4933,12 @@ static int mxt_initialize(struct mxt_data *data)
 	while (1) {
 
 		error = mxt_read_info_block(data);
-		if (!error)
+		if (!error) {
+			dev_dbg(&client->dev, "Read Info Block success\n");
 			break;
+		} else {
+			dev_err(&client->dev, "Read Info Block failed(%d), checking for bootloader mode.\n", error);
+		}
 
 		if (!data->crc_enabled) {
 		/* Check bootloader state */
@@ -6036,6 +6540,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	init_completion(&data->bl_completion);
 	init_completion(&data->reset_completion);
 	init_completion(&data->crc_completion);
+	init_completion(&data->t68_completion);
 
 	data->suspend_mode = dmi_check_system(chromebook_T9_suspend_dmi) ?
 		MXT_SUSPEND_T9_CTRL : MXT_SUSPEND_DEEP_SLEEP;

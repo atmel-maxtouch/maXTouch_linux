@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20220815"
+#define DRIVER_VERSION_NUMBER "4.19-20220816"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -2217,6 +2217,8 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 
 }
 
+#ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
+
 static void mxt_backup_config(struct mxt_data *data, u8 cmd, u8 value, bool cflag)
 {
 	/*
@@ -2240,6 +2242,7 @@ static void mxt_backup_config(struct mxt_data *data, u8 cmd, u8 value, bool cfla
 	if (cflag)
 		mxt_wait_for_completion(data, &data->crc_completion, MXT_CRC_TIMEOUT);
 }
+#endif
 
 static int mxt_soft_reset(struct mxt_data *data, bool reset_enabled);
 
@@ -4928,7 +4931,6 @@ static int mxt_initialize(struct mxt_data *data)
 	struct i2c_client *client = data->client;
 	int recovery_attempts = 0;
 	int error;
-	int val;
 
 	while (1) {
 
@@ -6296,7 +6298,6 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
 	&dev_attr_tx_seq_num.attr,
-	&dev_attr_diagnostic_msg.attr,
 	&dev_attr_debug_irq.attr,
 	&dev_attr_crc_enabled.attr,
 	&dev_attr_object.attr,
@@ -6307,6 +6308,9 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_debug_v2_enable.attr,
 	&dev_attr_debug_notify.attr,
 	&dev_attr_mxt_reset.attr,
+#ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
+	&dev_attr_diagnostic_msg.attr,
+#endif
 	NULL
 };
 

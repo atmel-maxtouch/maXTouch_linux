@@ -60,7 +60,15 @@
 				atmel_mxt_ts@4a {
 					compatible = "atmel,atmel_mxt_ts";
 					reg = <0x4a>;
-					resync-enabled;
+					resync-enabled;	/* Set if resync required */
+					xyswitch = <1>;
+					inverty = <1>;
+					invertx = <1>;
+					atmel,x-range = <1822>;
+					atmel,y-range = <1023>;
+					atmel,tch-aux = <0>;
+					atmel,xsize = <0>;
+					atmel,ysize = <0>;
 					reset-gpios = <&pioE 8 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */

@@ -3590,8 +3590,11 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 	} /* End of while - parse of raw file */
 
-	return 0;
+	return 0;;
 }
+
+
+static int mxt_read_info_block(struct mxt_data *data);
 
 static int mxt_init_t7_power_cfg(struct mxt_data *data);
 
@@ -3871,8 +3874,16 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 		goto release_mem;
 	}
-
+	
 	mxt_check_encryption(data);
+
+	ret = mxt_read_info_block(data);
+
+	if (!ret) {
+		dev_dbg(dev, "Read Info Block success\n");
+	} else {
+		dev_err(dev, "Read Info Block failed(%d), checking for bootloader mode.\n", error);
+	}
 
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
 	/* T7 config may have changed */
@@ -4443,8 +4454,11 @@ static int mxt_read_info_block(struct mxt_data *data)
 	u8 flag = 0;
 
 	/* If info block already allocated, free it */
-	if (data->raw_info_block)
+	if (data->raw_info_block) {
 		mxt_free_object_table(data);
+		id_buf = NULL;
+		kfree(id_buf);
+	}
 	
 	flag |= F_R_CHIP_ID;
 

@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20220901"
+#define DRIVER_VERSION_NUMBER "4.19-20220909"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -582,6 +582,7 @@ struct mxt_data {
 	struct gpio_desc *reset_gpio;
 	u8 crc_err_count;
 	bool is_resync_enabled;
+	const char *cfg_name;
 
 	/* T68 variables */	
 	u8 *t68_buf;
@@ -4047,7 +4048,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			max_id = 0;
 		}
 
-		dev_info(&data->client->dev,
+		dev_dbg(&data->client->dev,
 			"T%u Start:%u Size:%zu Instances:%zu Report IDs:%u-%u\n",
 			object->type, object->start_address,
 			mxt_obj_size(object), mxt_obj_instances(object),
@@ -5380,78 +5381,29 @@ static int mxt_initialize(struct mxt_data *data)
 	if (error)
 		return error;
 
-	if (!(data->crc_enabled)) {
-		/* As built-in driver, root filesystem may not be available yet */
-		error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
-						&client->dev, GFP_KERNEL, data,
-						mxt_config_cb);
-		if (error) {
-			dev_warn(&client->dev, "Failed to invoke firmware loader: %d\n",
-				error);
+	if (data->cfg_name) {
+		if (!(data->crc_enabled)) {
+			/* As built-in driver, root filesystem may not be available yet */
+			error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
+							&client->dev, GFP_KERNEL, data,
+							mxt_config_cb);
+			if (error) {
+				dev_warn(&client->dev, "Failed to invoke firmware loader: %d\n",
+					error);
+			}
 		}
 	} else {
-		data->irq_processing = false;
 
-		error = mxt_init_t7_power_cfg(data);
-
-		if (error) {
-			dev_err(&client->dev, "Failed to initialize power cfg\n");
-			return error;
-		}
-
-		if (data->multitouch) {
-
-			dev_info(&client->dev, "mxt_init: Registering devices\n");
-			error = mxt_initialize_input_device(data);
-
-			if (error)
-				return error;
-
-			data->irq_processing = true;
-
-#ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
-
-			if (data->T152_address) {
-				dev_info(&client->dev, "Initializing Knobs on Display Device\n");
-
-				error = mxt_init_knob_input(data);
-
-				if (error) {
-					dev_warn(&client->dev, "Error %d, registering Knob device\n",
-						error);
-				}
-
-				error = mxt_init_sec_knob_input(data);
-
-				if (error) {
-					dev_warn(&client->dev, "Error %d, registering Knob device\n",
-						error);
-				}
-			}
-#endif
-			if (data->T100_instances > 1) {
-			    error = mxt_init_secondary_input(data);
-			    if (error)
-				    dev_warn(&client->dev, "Error %d registering secondary device\n", error);
-			}
-		} else {
-			dev_warn(&client->dev, "No touch object detected\n");
-		}
-
-		mxt_debug_init(data);
-	}
-
-	data->irq_processing = true;
-
-	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
-		if(!data->crc_enabled){
-			error = mxt_check_retrigen(data);
-			if (error) 
-				dev_err(&client->dev, "RETRIGEN Not Enabled or unavailable\n");
-		}
+		error = mxt_configure_objects(data, NULL);
+		if (error)
+			goto err_free_object_table;
 	}
 
 	return 0;
+
+err_free_object_table:
+	mxt_free_object_table(data);
+	return error;
 }
 
 static int mxt_set_t7_power_cfg(struct mxt_data *data, u8 sleep)
@@ -5977,7 +5929,6 @@ static int mxt_configure_objects(struct mxt_data *data,
 			data->irq_processing = true;
 	}
 
-		
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
 		if (!data->crc_enabled) {
 			error = mxt_check_retrigen(data);
@@ -6841,6 +6792,7 @@ static void mxt_input_close(struct input_dev *dev)
 static int mxt_parse_device_properties(struct mxt_data *data)
 {
 	static const char keymap_property[] = "linux,gpio-keymap";
+	static const char config_property[] = "atmel,cfg_name";
 	struct device *dev = &data->client->dev;
 	u32 *keymap;
 	int n_keys;
@@ -6873,6 +6825,16 @@ static int mxt_parse_device_properties(struct mxt_data *data)
 
 		data->t19_keymap = keymap;
 		data->t19_num_keys = n_keys;
+	}
+
+	if (device_property_present(dev, config_property)) {
+
+		error = device_property_read_string(dev, config_property, 
+			&data->cfg_name);
+
+		if (error)
+			dev_err(dev, "failed to parse '%s' property: %d\n",
+				config_property, error);
 	}
 
 	data->is_resync_enabled = device_property_read_bool(dev, "resync-enabled");

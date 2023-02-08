@@ -75,6 +75,7 @@
 					xyswitch = <1>; 
 					inverty = <1>;
 					invertx = <1>;
+					/* Modify to fix sensor */
 					atmel,x-range = <1822>;
 					atmel,y-range = <1023>;
 					atmel,tch-aux = <0>;

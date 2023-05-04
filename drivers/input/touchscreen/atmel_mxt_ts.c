@@ -563,7 +563,7 @@ struct mxt_data {
 	struct bin_attribute debug_msg_attr;
 	struct mutex debug_msg_lock;
 	u8 max_reportid;
-	u32 config_crc;
+	u32 device_cfg_crc;
 	u32 info_crc;
 	u8 bootloader_addr;
 	u8 *msg_buf;
@@ -701,7 +701,7 @@ struct mxt_data {
 	bool system_power_up;
 	u8 comms_failure_count;
 	bool mxt_reset_state;
-	volatile bool sysfs_updating_config_fw;
+	volatile bool sysfs_updating_cfg_fw;
 
 	/* Debugfs variables */
 	struct dentry *debug_dir;
@@ -937,12 +937,15 @@ static int mxt_wait_for_completion(struct mxt_data *data,
 	long ret;
 
 	ret = wait_for_completion_interruptible_timeout(comp, timeout);
-	if (ret < 0) {
-		return ret;
+	if (ret > 0) {
+		dev_dbg(dev, "Time left in jiffies %li", ret);
 	} else if (ret == 0) {
 		dev_err(dev, "Wait for completion timed out.\n");
 		return -ETIMEDOUT;
+	} else if (ret == -ERESTARTSYS) {
+		dev_warn(dev, "Completion event was interrupted\n");
 	}
+
 	return 0;
 }
 
@@ -1390,13 +1393,15 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 	if (ret == len) {		
 		ptr_data = val;
 
-		if ((reg == data->T5_address || reg == data->T144_address) && (data->system_power_up)) {
+		if ((reg == data->T5_address || reg == data->T144_address) &&
+			((data->T5_address != 0x0000) || (data->T144_address != 0x0000))) {
 
 			crc_data = 0;
 
 			for (i = 0; i < (len - 1); i++){
 				crc_data = __mxt_calc_crc8(crc_data, ptr_data[i]);
-				dev_dbg(&client->dev, "Read: Data = [%x], crc8 =  %x\n", ((char *) ptr_data)[i], crc_data);
+				dev_dbg(&client->dev, "Read: Data[%d] = [%x], crc8 =  %x\n",
+						i, ((char *) ptr_data)[i], crc_data);
 			}
 
 			if (crc_data == ptr_data[len - 1]){
@@ -1773,8 +1778,8 @@ static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 	u32 crc = msg[2] | (msg[3] << 8) | (msg[4] << 16);
 	int ret;
 
-	if (crc != data->config_crc) {
-		data->config_crc = crc;
+	if (crc != data->device_cfg_crc) {
+		data->device_cfg_crc = crc;
 		dev_dbg(dev, "T6 Config Checksum: 0x%06X\n", crc);
 	}
 
@@ -2404,7 +2409,7 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 	 * On failure, CRC is set to 0 and config will always be
 	 * downloaded.
 	 */
-	data->config_crc = 0;
+	data->device_cfg_crc = 0;
 
 	if((!data->crc_enabled))
 		reinit_completion(&data->crc_completion);
@@ -2429,7 +2434,7 @@ static void mxt_backup_config(struct mxt_data *data, u8 cmd, u8 value, bool cfla
 	 * On failure, CRC is set to 0 and config will always be
 	 * downloaded.
 	 */
-	data->config_crc = 0;
+	data->device_cfg_crc = 0;
 
 	if (cflag)
 		reinit_completion(&data->crc_completion);
@@ -3793,16 +3798,16 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	 * the configuration CRC is invalid anyway.
 	 */
 	if (info_crc == data->info_crc) {
-		if (config_crc == 0 || data->config_crc == 0) {
+		if (config_crc == 0 || data->device_cfg_crc == 0) {
 			dev_info(dev, "CRC zero, attempting to apply config\n");
-		} else if (config_crc == data->config_crc) {
+		} else if (config_crc == data->device_cfg_crc) {
 			dev_info(dev, "Config file CRC 0x%06X same as device CRC: No update required.\n",
-				 data->config_crc);
+				 data->device_cfg_crc);
 			ret = 0;
 			goto release_raw;
 		} else {
 			dev_info(dev, "Device config CRC 0x%06X: does not match file CRC 0x%06X: Updating...\n",
-				 data->config_crc, config_crc);
+				 data->device_cfg_crc, config_crc);
 		}
 	} else {
 		dev_warn(dev,
@@ -3852,7 +3857,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 			dev_warn(dev, "Could not find CRC start\n");
 
 		dev_dbg(dev, "calculate_crc: crc_start %d, cfg.object_skipped_ofs %d, cfg.mem_size %i\n", 
-			cfg.mem_size, cfg.object_skipped_ofs, cfg.mem_size);
+			crc_start, cfg.object_skipped_ofs, cfg.mem_size);
 
 		if (crc_start > cfg.start_ofs) {
 			calculated_crc = mxt_calculate_crc(cfg.mem,
@@ -3878,21 +3883,21 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	mxt_soft_reset(data, true);
 
-	if (calculated_crc == data->config_crc) {
+	if (calculated_crc == data->device_cfg_crc) {
 
 		dev_info(dev, "Calculated config CRC matches device CRC, 0x%06X. "
-			"Config successfully updated.", data->config_crc);
+			"Config successfully updated.", data->device_cfg_crc);
 
 	} else if (CHECK_BIT(data->encryption_state, DEV_ENC_FLAG) && 
-		(data->config_crc == config_crc)) {
+		(data->device_cfg_crc == config_crc)) {
 			
 		dev_info(dev, "Encrypted device CRC matches file CRC. "
-			"Config successfully updated 0x%06X\n", data->config_crc);
+			"Config successfully updated 0x%06X\n", data->device_cfg_crc);
 
 	} else {
 		dev_warn(dev, "Device CRC 0x%06X does not match "
 			"calculated 0x%06X,	or file CRC 0x%06X\n",
-			calculated_crc, data->config_crc, config_crc);
+			data->device_cfg_crc, calculated_crc, config_crc);
 
 		goto release_mem;
 	}
@@ -3911,13 +3916,11 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	/* T7 config may have changed */
 		mxt_init_t7_power_cfg(data);
 
-		if (!data->crc_enabled) {
-			error = mxt_check_retrigen(data);
+		error = mxt_check_retrigen(data);
 	
-			if (error) {
-				dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
-				goto release_mem;
-			}
+		if (error) {
+			dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
+			goto release_mem;
 		}
 	}
 
@@ -5394,11 +5397,9 @@ static int mxt_initialize(struct mxt_data *data)
 	data->system_power_up = true;
 
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
-		if(!data->crc_enabled) {
-			error = mxt_check_retrigen(data);
-			if (error) {
-				dev_err(&client->dev, "RETRIGEN Not Enabled or unavailable\n");
-			}
+		error = mxt_check_retrigen(data);
+		if (error) {
+			dev_err(&client->dev, "RETRIGEN Not Enabled or unavailable\n");
 		}
 	}
 
@@ -5423,18 +5424,14 @@ static int mxt_initialize(struct mxt_data *data)
 		return error;
 
 	if (data->cfg_name) {
-		if (!(data->crc_enabled)) {
-			/* As built-in driver, root filesystem may not be available yet */
-			error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
-							&client->dev, GFP_KERNEL, data,
-							mxt_config_cb);
-			if (error) {
-				dev_warn(&client->dev, "Failed to invoke firmware loader: %d\n",
-					error);
-			}
+		/* As built-in driver, root filesystem may not be available yet */
+		error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
+						&client->dev, GFP_KERNEL, data,
+						mxt_config_cb);
+		if (error) {
+			dev_warn(&client->dev, "Failed to invoke firmware loader: %d\n", error);
 		}
 	} else {
-
 		error = mxt_configure_objects(data, NULL);
 		if (error)
 			goto err_free_object_table;
@@ -5951,9 +5948,6 @@ static int mxt_configure_objects(struct mxt_data *data,
 	struct device *dev = &data->client->dev;
 	int error;
 
-	if (data->crc_enabled)
-		data->irq_processing = false;
-
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
 		error = mxt_init_t7_power_cfg(data);
 		if (error) {
@@ -5966,19 +5960,17 @@ static int mxt_configure_objects(struct mxt_data *data,
 		error = mxt_update_cfg(data, cfg);
 		if (error)
 			dev_warn(dev, "Error %d updating config\n", error);
-		} else {
-			data->irq_processing = true;
+	} else {
+		data->irq_processing = true;
 	}
 
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
-		if (!data->crc_enabled) {
-			error = mxt_check_retrigen(data);
-			if (error)
-				dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
-		}
+		error = mxt_check_retrigen(data);
+		if (error)
+			dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
 	}
 
-	if (data->system_power_up && !(data->sysfs_updating_config_fw)) {
+	if (data->system_power_up && !(data->sysfs_updating_cfg_fw)) {
 		if (data->multitouch) {
 
 			dev_info(dev, "mxt_config: Registering devices\n");
@@ -6022,8 +6014,9 @@ static int mxt_configure_objects(struct mxt_data *data,
 	msleep(100); 
 
 	data->irq_processing = true;
-	data->system_power_up = false;
-	data->sysfs_updating_config_fw = false;
+	/* TBD - Review change in SPI interface */
+	//data->system_power_up = false;
+	data->sysfs_updating_cfg_fw = false;
 
 	return 0;
 }
@@ -6034,7 +6027,7 @@ static ssize_t mxt_config_crc_show(struct device *dev,
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 
-	return scnprintf(buf, PAGE_SIZE, "%06x\n", data->config_crc);
+	return scnprintf(buf, PAGE_SIZE, "%06x\n", data->device_cfg_crc);
 }
 
 /* Firmware Version is returned as Major.Minor.Build */
@@ -6245,6 +6238,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 			dev_info(dev, "Sent bootloader command.\n");
 		}
 
+		/* Switch to bootloader wait time */
 		msleep(MXT_RESET_TIME);
 
 		/* Do not need to scan since we know family ID */
@@ -6329,7 +6323,8 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	
 	ret = mxt_wait_for_completion(data, &data->bl_completion,
 				      MXT_BOOTLOADER_WAIT);
-	if (ret)
+
+	if (ret < 0)
 		goto disable_irq;
 
 	data->in_bootloader = false;
@@ -6341,25 +6336,62 @@ release_firmware:
 	return ret;
 }
 
+static int mxt_update_file_name (struct device *dev, char **file_name,
+								const char *buf, size_t count)
+{
+	char *file_name_tmp;
+
+	/* Simple sanity check */
+	if (count> 64) {
+		dev_warn(dev, "File name too long\n");
+		return -EINVAL;
+	}
+
+	file_name_tmp = krealloc(*file_name, count + 1, GFP_KERNEL);
+	if (!file_name_tmp)
+		return -ENOMEM;
+
+	*file_name = file_name_tmp;
+	memcpy(*file_name, buf, count);
+
+	/* Echo into the sysfs entry may append newline at the end of buf */
+	if (buf[count - 1] == '\n')
+		(*file_name)[count - 1] = '\0';
+	else
+		(*file_name)[count] = '\0';
+
+	return 0;
+}
+
 static ssize_t mxt_update_fw_store(struct device *dev,
 					struct device_attribute *attr,
 					const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
-	int error;
 	struct mxt_object *object;
+	char *file_name = NULL;
+	int error;
 
-	data->sysfs_updating_config_fw = true;
+	data->sysfs_updating_cfg_fw = true;
 	data->irq_processing = true;
 
- 	error = mxt_clear_cfg(data);
+	error = mxt_update_file_name(dev, &file_name, buf, count);
+	if (error) {
+		dev_err (dev, "Failed to get filename: %s \n", buf);
+		return error;
+	}
 
+	/* Needs keys if using with encryption */
+ 	error = mxt_clear_cfg(data);
  	if (error)
 		dev_err(dev, "Warning: Failed to clear configuration\n");
 
 	error = mxt_load_fw(dev, MXT_FW_NAME);
+
 	if (error) {
 		dev_err(dev, "The firmware update failed(%d)\n. IRQ disabled.", error);
+		disable_irq(data->irq);
+
 		count = error;
 	} else {
 		dev_info(dev, "The firmware update succeeded\n");
@@ -6368,11 +6400,15 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	msleep(MXT_FW_FLASH_TIME);
 
 	mxt_update_seq_num_lock(data, true, 0x00);
+	
+	kfree(file_name);
+	
+	mxt_soft_reset(data, true);
 
 	/* Read infoblock to determine device type */
 	error = mxt_read_info_block(data);
-		if (error)
-			return error;
+	if (error)
+		return error;
 
 	//Check for T144 object
 	object = mxt_get_object(data, MXT_SPT_MESSAGECOUNT_T144);
@@ -6382,22 +6418,9 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	else
 		data->crc_enabled = true;
 
-	if(!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
-		if (!(data->crc_enabled)) {
-			error = mxt_check_retrigen(data);
-
-			if (error) 
-				dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
-		}
-	}
-
-	data->irq_processing = false;
-
 	error = mxt_acquire_irq(data);
 	if (error)
 		return error;
-
-	mxt_soft_reset(data, true);
 
 	error = request_firmware_nowait(THIS_MODULE, true, MXT_CFG_NAME,
 					dev, GFP_KERNEL, data,
@@ -6407,6 +6430,13 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		dev_warn(dev, "Failed to invoke firmware loader: %d\n",
 			error);
 		return error;
+	}
+
+	if(!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
+
+		error = mxt_check_retrigen(data);
+		if (error) 
+			dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
 	}
 	
 	return count;
@@ -6420,10 +6450,7 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 	const struct firmware *cfg;
 	int ret, error;
 
-	data->sysfs_updating_config_fw = true;
-
-	if (data->crc_enabled)
-		data->irq_processing = false;
+	data->sysfs_updating_cfg_fw = true;
 
 	ret = request_firmware(&cfg, MXT_CFG_NAME, dev);
 	if (ret < 0) {
@@ -6449,7 +6476,7 @@ static ssize_t mxt_update_cfg_store(struct device *dev,
 
 	ret = mxt_configure_objects(data, cfg);
 
-	data->sysfs_updating_config_fw = false;
+	data->sysfs_updating_cfg_fw = false;
 	data->irq_processing = true;
 
 	if (ret)
@@ -6993,7 +7020,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	
 	data->msg_num.txseq_num = 0x00; //Initialize the TX seq_num
 	data->crc_enabled = false;	//Initialize the crc bit
-	data->sysfs_updating_config_fw = false;
+	data->sysfs_updating_cfg_fw = false;
 	data->comms_failure_count = 0;
 	data->irq_processing = true;
 

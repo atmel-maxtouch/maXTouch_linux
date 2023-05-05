@@ -396,13 +396,13 @@ enum t100_type {
 #define MXT_BACKUP_TIME		50	/* msec */
 #define MXT_RESET_GPIO_TIME	20	/* msec */
 #define MXT_RESET_INVALID_CHG	1000	/* msec */
-#define MXT_RESET_TIME		200	/* msec */
+#define MXT_RESET_TIME		300	/* msec */
 #define MXT_RESET_TIMEOUT	3000	/* msec */
 #define MXT_CRC_TIMEOUT		1000	/* msec */
 #define MXT_FW_FLASH_TIME	1000	/* msec */
 #define MXT_FW_RESET_TIME	3000	/* msec */
 #define MXT_FW_CHG_TIMEOUT	300	/* msec */
-#define MXT_BOOTLOADER_WAIT	3000	/* msec */
+#define MXT_BOOTLOADER_WAIT	1000 	/* msec */
 
 /* Command to unlock bootloader */
 #define MXT_UNLOCK_CMD_MSB	0xaa
@@ -3811,7 +3811,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		}
 	} else {
 		dev_warn(dev,
-			 "Warning: Info CRC does not match: Error - device crc=0x%06X file=0x%06X\nFailed Config Programming\n",
+			 "Error: Device info crc=0x%06X does not match file info crc=0x%06X\nFailed Config Programming\n",
 			 data->info_crc, info_crc);
 		goto release_raw; 
 	}
@@ -6336,7 +6336,7 @@ release_firmware:
 	return ret;
 }
 
-static int mxt_update_file_name (struct device *dev, char **file_name,
+static int mxt_update_file_name(struct device *dev, char **file_name,
 								const char *buf, size_t count)
 {
 	char *file_name_tmp;
@@ -6368,7 +6368,6 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 					const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
-	struct mxt_object *object;
 	char *file_name = NULL;
 	int error;
 
@@ -6397,28 +6396,21 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		dev_info(dev, "The firmware update succeeded\n");
 	}
 
+	/* add wait after fw load before IRQ turn on */
 	msleep(MXT_FW_FLASH_TIME);
 
 	mxt_update_seq_num_lock(data, true, 0x00);
 	
+	error = mxt_acquire_irq(data);
+	if (error)
+		return error;
+
 	kfree(file_name);
 	
 	mxt_soft_reset(data, true);
 
 	/* Read infoblock to determine device type */
 	error = mxt_read_info_block(data);
-	if (error)
-		return error;
-
-	//Check for T144 object
-	object = mxt_get_object(data, MXT_SPT_MESSAGECOUNT_T144);
-
-	if (!object)
-		data->crc_enabled = false;
-	else
-		data->crc_enabled = true;
-
-	error = mxt_acquire_irq(data);
 	if (error)
 		return error;
 
@@ -6430,13 +6422,6 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 		dev_warn(dev, "Failed to invoke firmware loader: %d\n",
 			error);
 		return error;
-	}
-
-	if(!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
-
-		error = mxt_check_retrigen(data);
-		if (error) 
-			dev_err(dev, "RETRIGEN Not Enabled or unavailable\n");
 	}
 	
 	return count;

@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20230802"
+#define DRIVER_VERSION_NUMBER "4.19-20230501"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -528,6 +528,7 @@ struct mxt_crc {
 /* Each client has this additional data */
 struct mxt_data {
 	struct i2c_client *client;
+	struct mutex i2c_lock;	/* Avoid conflict on I2C bus accessing tx_seq_num */
 	struct input_dev *input_dev;
 	struct input_dev *input_dev_sec;
 #ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
@@ -973,6 +974,19 @@ static u8 mxt_update_seq_num(struct mxt_data *data, bool reset_counter, u8 count
 	return current_val;
 }
 
+static u8 mxt_update_seq_num_lock(struct mxt_data *data, bool reset_counter, u8 counter_value)
+{
+	u8 val;
+
+	mutex_lock(&data->i2c_lock);
+
+	val = mxt_update_seq_num(data, reset_counter, counter_value);
+
+	mutex_unlock(&data->i2c_lock);
+
+	return val;
+}
+
 static bool mxt_lookup_chips(struct mxt_data *data)
 {
 	struct device *dev = &data->client->dev;
@@ -1351,6 +1365,8 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 	if (!buf)
 		return -ENOMEM;
 
+	mutex_lock(&data->i2c_lock);
+
 	if ((crc8 || (reg == data->T144_address)) && data->system_power_up) {
 
 		buf[0] = reg & 0xff;
@@ -1412,6 +1428,8 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 	}
 
 end_reg_read:
+
+	mutex_unlock(&data->i2c_lock);
 
 	kfree(buf);
 	return ret;
@@ -1494,6 +1512,8 @@ static int __mxt_write_reg_crc(struct i2c_client *client, u16 reg, u16 length,
 	if (!databuf)
 		return -ENOMEM;
 
+	mutex_lock(&data->i2c_lock);
+
 	if (!(length == 0x00))	//Need this or else memory crash
 		memcpy(&databuf[0], val, length);	//Copy only first message to databuf
 
@@ -1557,6 +1577,8 @@ static int __mxt_write_reg_crc(struct i2c_client *client, u16 reg, u16 length,
 			break;
 
 	} while (bytesToWrite > 0);
+
+	mutex_unlock(&data->i2c_lock);
 
 	kfree(databuf);		
 	return ret;
@@ -3095,7 +3117,7 @@ static int mxt_soft_reset(struct mxt_data *data, bool reset_enabled)
 		return ret;
 
 	if (reset_enabled && data->crc_enabled)
-		mxt_update_seq_num(data, true, 0x00);
+		mxt_update_seq_num_lock(data, true, 0x00);
 
 	/* Ignore CHG line after reset */
 	msleep(MXT_RESET_INVALID_CHG);
@@ -4085,6 +4107,11 @@ static int mxt_clear_cfg(struct mxt_data *data)
 	int write_offset = 0;
 	int totalBytesToWrite = 0;
 	int error;
+
+	/* Avoid crash if chip in bootloader at bootup */
+	if (!data->info) {
+		return -ENOENT;
+	}
 
 	/* Start of first Tobject address */
 	config.start_ofs = MXT_OBJECT_START +
@@ -6517,7 +6544,7 @@ static ssize_t mxt_update_fw_store(struct device *dev,
  	error = mxt_clear_cfg(data);
 
  	if (error)
-		dev_err(dev, "Failed clear configuration\n");
+		dev_err(dev, "Warning: Failed to clear configuration\n");
 
 	error = mxt_load_fw(dev, MXT_FW_NAME);
 	if (error) {
@@ -6529,7 +6556,7 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 
 	msleep(MXT_FW_FLASH_TIME);
 
-	mxt_update_seq_num(data, true, 0x00);
+	mxt_update_seq_num_lock(data, true, 0x00);
 
 	/* Read infoblock to determine device type */
 	error = mxt_read_info_block(data);
@@ -7150,6 +7177,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	init_completion(&data->reset_completion);
 	init_completion(&data->crc_completion);
 	init_completion(&data->t68_completion);
+	mutex_init(&data->i2c_lock);
 
 	data->suspend_mode = dmi_check_system(chromebook_T9_suspend_dmi) ?
 		MXT_SUSPEND_T9_CTRL : MXT_SUSPEND_DEEP_SLEEP;

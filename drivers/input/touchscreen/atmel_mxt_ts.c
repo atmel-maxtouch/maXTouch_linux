@@ -2794,7 +2794,7 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	if (num_left) {
 		dev_dbg(dev, "Remaining messages to process\n");
 
-		ret = mxt_read_and_process_messages(data, num_left, false);
+		ret = mxt_read_and_process_messages(data, num_left, true);
 		if (ret < 0)
 			goto end;
 		else if (ret != num_left) {

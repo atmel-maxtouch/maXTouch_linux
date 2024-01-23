@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20230501"
+#define DRIVER_VERSION_NUMBER "4.19-20240123"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -4773,7 +4773,7 @@ static int mxt_read_t100_config(struct mxt_data *data, u8 instance)
 		}	
 	}
 
-	if (CHECK_BIT(data->encryption_state, DEV_ENC_FLAG)) {
+	if (!(CHECK_BIT(data->encryption_state, CFG_ENC_FLAG))) {
 		error = mxt_touchscreen_parse_properties(data);
 		if (error) {
 			dev_err(&client->dev, "Error parsing device properties\n");

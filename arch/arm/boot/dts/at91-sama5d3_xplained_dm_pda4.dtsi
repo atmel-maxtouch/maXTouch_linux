@@ -57,9 +57,9 @@
 					pinctrl-0 = <&pinctrl_mgc31x0_irq>;
 				};
 			
-				atmel_mxt_ts@4a {
+				atmel_mxt_ts@4b {
 					compatible = "atmel,atmel_mxt_ts";
-					reg = <0x4a>;
+					reg = <0x4b>;
 					reset-gpios = <&pioE 8 GPIO_ACTIVE_LOW>;
 					interrupt-parent = <&pioE>;
 					interrupts = <7 0x2>;	/* Falling edge only */
@@ -75,7 +75,7 @@
 					xyswitch = <1>; 
 					inverty = <1>;
 					invertx = <1>;
-					atmel,x-range = <1822>;
+					atmel,x-range = <1023>;
 					atmel,y-range = <1023>;
 					atmel,tch-aux = <0>;
 					atmel,xsize = <0>;

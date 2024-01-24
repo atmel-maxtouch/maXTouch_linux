@@ -75,7 +75,7 @@
 					xyswitch = <1>; 
 					inverty = <1>;
 					invertx = <1>;
-					atmel,x-range = <1822>;
+					atmel,x-range = <1023>;
 					atmel,y-range = <1023>;
 					atmel,tch-aux = <0>;
 					atmel,xsize = <0>;

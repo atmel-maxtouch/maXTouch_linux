@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20231018_enc"
+#define DRIVER_VERSION_NUMBER "4.19-20241115.0.enc"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -55,6 +55,7 @@
 #define MXT_CFG_MAGIC_V1	"OBP_RAW V1"
 #define MXT_CFG_MAGIC_V2	"OBP_RAW V2"
 #define MXT_CFG_MAGIC_V3	"OBP_RAW V3"
+#define MXT_CFG_MAGIC_V4	"OBP_RAW V4"
 
 /* Registers */
 #define MXT_OBJECT_START	0x07
@@ -400,7 +401,7 @@ enum t100_type {
 #define MXT_RESET_GPIO_TIME	20	/* msec */
 #define MXT_RESET_INVALID_CHG	1000	/* msec */
 #define MXT_RESET_TIME		200	/* msec */
-#define MXT_RESET_TIMEOUT	3000	/* msec */
+#define MXT_RESET_TIMEOUT	1000	/* msec */
 #define MXT_CRC_TIMEOUT		1000	/* msec */
 #define MXT_FW_FLASH_TIME	1000	/* msec */
 #define MXT_FW_RESET_TIME	3000	/* msec */
@@ -486,16 +487,19 @@ struct mxt_object {
 /// \Default keys for testing only
 /// \Replace with customer key and IV before compile
 
+/* Example keys for testing with below devices */
+/* mXT640UD-002, mXT336UD-002, mXT2952TD_EN-2.0 */
+
 static unsigned char ck_key[16] = {
 
-	0x81, 0x85, 0x80, 0x2C, 0x0F, 0x43, 0x8E, 0xE1,
-	0x1D, 0x98, 0x24, 0xB7, 0xC3, 0x4A, 0xA1, 0x74
+	0xF4, 0x7A, 0x68, 0xFA, 0xDD, 0xB5, 0xCF, 0xA1,
+	0x0F, 0xFF, 0xF8, 0x5A, 0xBE, 0x3E, 0xAD, 0x53
 };
 
 static unsigned char iv[16] = {
 
-	0x1A, 0x8E, 0x71, 0xE2, 0x36, 0x56, 0x91, 0xAB,
-	0xCD, 0xC3, 0x49, 0xAF, 0xA8, 0xB4, 0xA7, 0xDA
+	0xEC, 0x90, 0xE4, 0x80, 0xDC, 0x1D, 0x6F, 0xE0,
+	0x2D, 0xF9, 0x26, 0xCC, 0x25, 0x8C, 0x0F, 0xB2
 };
 
 #endif
@@ -646,6 +650,9 @@ struct mxt_data {
 	/* Encrpytion parameters */
 	u8 encryption_state;
 
+	/* Msg enc state change */
+	bool msg_enc_triggered;
+
 #ifdef CONFIG_TOUCHSCREEN_ATMEL_ENCRYPTION
 	bool is_key_loaded;
 	u8 cust_key[16];
@@ -653,7 +660,6 @@ struct mxt_data {
 #endif
 	/* Datasize parameters*/
 	int enc_datasize;
-	u16 num_datasize_bytes;
 
 	/* Cached parameters from object table */
 	u16 T2_address;
@@ -1048,9 +1054,11 @@ static bool mxt_lookup_chips(struct mxt_data *data)
 	
 	family_id = data->info->family_id;
 	variant_id = data->info->variant_id;
-	
+
+	/* Add new devices supporting encryption */
 	switch (family_id) {
 		case 0xA6:
+		case 0xA4:
 
 			is_chip_found = true;
 
@@ -1058,31 +1066,44 @@ static bool mxt_lookup_chips(struct mxt_data *data)
 				SET_BIT(data->encryption_state, DEV_ENCRYPTED);
 				dev_info(dev, "Device is using encryption\n");
 				/* Set global block size for read */
+				/* TBD - investigate removal of blocksize */
 				data->enc_blocksize = 0x30;
 			} else {
 				CLEAR_BIT(data->encryption_state, DEV_ENCRYPTED);				
 			}
 
-			switch (variant_id & 0x80) {
-				case 0x14: /* 336UD-HA */
-					dev_info(dev, "Found mXT366UD-HA\n");
-					break;
-				case 0x15: /* 640UD-HA */
-					dev_info(dev, "Found mXT640UD-HA\n");
-					break;
-				case 0x16: /* 448UD-HA */
-					dev_info(dev, "Found mXT448UD-HA\n");
-					break;
-				case 0x1C: /* 336UD-002 */
-					dev_info(dev, "Found mXT336UD-002\n");
-					break;
-				case 0x17:  /* 640UD-002 */
-				case 0x1D:  /* 228UD-002 */
-					dev_info(dev, "Found mXT288UD-002\n");
-					break;
+			/* Identify chips here, add based on project */
+			if (family_id == 0xA6) {
+				switch (variant_id & 0x80) {
+					case 0x14: /* 336UD-HA */
+						dev_info(dev, "Found mXT366UD-HA\n");
+						break;
+					case 0x15: /* 640UD-HA */
+						dev_info(dev, "Found mXT640UD-HA\n");
+						break;
+					case 0x16: /* 448UD-HA */
+						dev_info(dev, "Found mXT448UD-HA\n");
+						break;
+					case 0x1C: /* 336UD-002 */
+						dev_info(dev, "Found mXT336UD-002\n");
+						break;
+					case 0x17:  /* 640UD-002 */
+					case 0x1D:  /* 228UD-002 */
+						dev_info(dev, "Found mXT288UD-002\n");
+						break;
 
-				default:
-					break;
+					default:
+						break;
+				}
+			} else if (family_id == 0xA4) {
+				switch (variant_id & 0x80) {
+					case 0x59: /* mXT2952TD-EN */
+						dev_info(dev, "Found mXT2952TD-EN\n");
+						break;
+
+					default:
+						break;
+				}
 			}
 
 		default:
@@ -1385,6 +1406,7 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 
 	mutex_lock(&data->i2c_lock);
 
+	/* Send write address on power up only */
 	if ((crc8 || (reg == data->T144_address)) && data->system_power_up) {
 
 		buf[0] = reg & 0xff;
@@ -1634,21 +1656,20 @@ static int mxt_write_block(struct i2c_client *client, u16 reg, u16 len,
 	u8 retry_counter = 0;
 	size_t msg_count;
 
-	/*  Flag for sysfs write, if cfg is encrypted */
+	/*  Flag for sysfs write from mxt-app, device encrypted */
 	if ((flag & F_W_SYSFS_ID) == F_W_SYSFS_ID) {
-		/* Get real length minus datasize */
+		/* Get real length minus embedded datasize bytes*/
 		message_length = len - 2; 
 		bytesToWrite = len - 2;
-	} else { // for cfg encryption OFF
+	} else { /* Normal writes, internal or sysfs, non-encyrpted */
 		/* Make copy of original length */
 		message_length = len;		
 		bytesToWrite = len;
 	}
 
-	/* len + datasize header for both message buffers */
-	/* tbuf handles messages with embedded datasize */
-	/* wbuf handles messages with no datasize */
-	/* TBD combine buffers if possible */
+	/* wbuf handles messages with embedded datasize */
+	/* tbuf handles messages with no enc datasize embedded */
+	/* TBD - combine buffers if possible */
 	wbuf = kmalloc((len + 2), GFP_KERNEL);
 	if (!wbuf)
 		return -ENOMEM;
@@ -1668,13 +1689,15 @@ static int mxt_write_block(struct i2c_client *client, u16 reg, u16 len,
 		/* If sysfs write, separate data size bytes and data to be written */
 		if ((flag & F_W_SYSFS_ID) == F_W_SYSFS_ID) {
 			/* Initially only copy incoming datasize into wbuf */
-			/* Datasize is updated later if needed */
-			memcpy(&wbuf[0], (u8*)val, 2); /* TBD */
+			/* Datasize is updated later */
+			memcpy(&wbuf[0], (u8*)val, 2); /* Copy just embedded datasize */
 			/* save copy of datasize */
 			data->enc_datasize = (wbuf[0] | (wbuf[1] << 8));
 			/* tbuf contains data to be written only */
-			memcpy(&tbuf[0], ((u8*)val + 2), len-2); 
+			memcpy(&tbuf[0], ((u8*)val + 2), len-2);
 		}		
+	} else if (CHECK_BIT(data->encryption_state, MSG_ENCRYPTED)) {
+		memcpy(&tbuf[0], ((u8*)val + 2), len-2);
 	} else { // Non encrypted write, copy normal message into write buffer
 		memcpy(&wbuf[0], ((u8*)val), len);
 	}
@@ -1683,14 +1706,15 @@ static int mxt_write_block(struct i2c_client *client, u16 reg, u16 len,
 
 		write_addr = reg + bytesWritten;
 		
-		/* data size not included in messages */
-		if (CHECK_BIT(data->encryption_state, CFG_ENCRYPTED)) {
+		/* TBD - DEV or CFG ENCRYPTION bit check */
+		if (CHECK_BIT(data->encryption_state, DEV_ENCRYPTED)) {
 
-			msg_count = message_length + 2;
+			msg_count = message_length + 2;	/* TBD can be removed */
 
 			if (write_addr >= (data->T38_address + data->T38_obj_size)) {
 				
 				/* Save - possibly just calculate padding for datasize vs pass in msg */
+				/* Take obj_size, and pad if .raw or .xcfg or internal write */
 				//if (!((message_length % 16 == 0x00) && (message_length != 0x00))) {
 					//message_length = (16 - (message_length % 16) + message_length);
 					
@@ -1704,15 +1728,27 @@ static int mxt_write_block(struct i2c_client *client, u16 reg, u16 len,
 				data_size = 0x0000;
 			}
 
-			/* Minus 2 is the data size */
-			wbuf[0] = data_size & 0xff;
-			wbuf[1] = (data_size >> 8) & 0xff;
+			/* TBD -- Do I need to do this, as T5 is less than T38 addr */
+			/* TBD -- Combine this code with above if statement */
+			if ((CHECK_BIT(data->encryption_state, MSG_ENCRYPTED)) &&
+				(!CHECK_BIT(data->encryption_state, CFG_ENCRYPTED))) {
+				/* Data size is 0x00 if writing to config with MSG enabled */
+				wbuf[0] = 0x00;
+				wbuf[1] = 0x00;
+			} else {
+				/* load the datasize byte into buffer */
+				wbuf[0] = data_size & 0xff;
+				wbuf[1] = (data_size >> 8) & 0xff;
+			}
 
 			if ((flag & F_W_SYSFS_ID) == F_W_SYSFS_ID) {
 				/* writes called from mxt-app */
 				/* TBD, reduce to one buffer */
 				/* Copy over just message */
 				memcpy(&wbuf[2], &tbuf[0 + bytesWritten], message_length);
+				/* move msg_count here, plus 2 for data size embedded */
+				/* Plus 2 for write addr */
+				msg_count = message_length + 2;	/* TBD -- Moved from above */
 			} else {
 				/* Writes called from within driver contain datasize header */
 				memcpy(&wbuf[2], (((u8*)val) + bytesWritten), message_length);
@@ -1738,7 +1774,7 @@ static int mxt_write_block(struct i2c_client *client, u16 reg, u16 len,
 						message_length = 16;
 					} else {
 						message_length = bytesToWrite;
-					}			
+					}
 				}
 			}
 			retry_counter = 0x00;
@@ -1887,10 +1923,7 @@ static int mxt_skcipher_req(struct mxt_data *data, u8 *databuf,
 		dev_err(&client->dev, 
 			"Error in %s\n", enc_dec ? "Encode" : "Decode");
 	}
-	
-	/* Do I need this delay */
-	msleep(100);
-		
+
 	crypto_free_skcipher(skcipher);
 		
 	skcipher_request_free(req);
@@ -2051,6 +2084,7 @@ static int mxt_check_encryption(struct mxt_data *data)
 		if (data->is_key_loaded == false) {
 			memcpy(data->cust_key, ck_key, 16);
 			memcpy(data->init_vector, iv, 16);
+			data->is_key_loaded = true;
 		}
 #endif
 		if (!(data->crc_enabled)) {
@@ -3106,7 +3140,6 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	/* Just read byte count if encrypted */
 
 	if (CHECK_BIT(data->encryption_state, MSG_ENCRYPTED)) {
-		//dev_info(dev, "t44_t144: reading byte count\n");
 		ret = mxt_read_block(data, data->T44_address,
 			1, data->T5_msg_buf, false);
 	} else if (!(data->crc_enabled)) {
@@ -3343,7 +3376,7 @@ static int mxt_soft_reset(struct mxt_data *data, bool reset_enabled)
 	msleep(MXT_RESET_INVALID_CHG);
 
 	ret = mxt_wait_for_completion(data, &data->reset_completion,
-				      MXT_RESET_TIMEOUT);
+		MXT_RESET_TIMEOUT);
 	if (ret)
 		return ret;
 
@@ -3845,6 +3878,21 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 				dev_info(dev, "Encrypted payload CRC from file = 0x%06X", data->enc_payload_crc);
 
+				if (data->t68_buf[32] & 0x04) {
+        			dev_info(dev, "Enabling T5 msg encryption");
+          			data->msg_enc_triggered = true;
+      			} else if (data->t68_buf[32] & 0x02) {
+        			dev_info(dev, "Enabling config encryption");
+        			data->msg_enc_triggered = false;
+      			} else if ((data->t68_buf[32] & 0x06) == 0x06) {
+        			dev_info(dev, "Enabling T5 msg and cfg encryption");
+        			data->msg_enc_triggered = true;
+      			} else if ((data->t68_buf[32] & 0x06) == 0x00) {
+      				if (CHECK_BIT(data->encryption_state, MSG_ENCRYPTED)) {
+        				data->msg_enc_triggered = true;
+        			}
+        			dev_info(dev, "Disabling device encryption");
+      			}
 			}
 
 			error = mxt_upload_t68_payload(data, cfg);
@@ -3880,31 +3928,35 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 			continue;
 		}
 
-		if (size > mxt_obj_size(object)) {
-			/*
-			 * Either we are in fallback mode due to wrong
-			 * config or config from a later fw version,
-			 * or the file is corrupt or hand-edited.
-			 */
-			dev_warn(dev, "Discarding %zu byte(s) in T%u\n",
-				 size - mxt_obj_size(object), type);
-		} else if (mxt_obj_size(object) > size) {
-			/*
-			 * If firmware is upgraded, new bytes may be added to
-			 * end of objects. It is generally forward compatible
-			 * to zero these bytes - previous behaviour will be
-			 * retained. However this does invalidate the CRC and
-			 * will force fallback mode until the configuration is
-			 * updated. We warn here but do nothing else - the
-			 * malloc has zeroed the entire configuration.
-			 */
-			dev_warn(dev, "Zeroing %zu byte(s) in T%d\n",
-				 mxt_obj_size(object) - size, type);
-		}
+		/* Skip is cfg is encrypted, messages do not pertain */
+		if (!(CHECK_BIT(data->encryption_state, CFG_ENCRYPTED))) {
 
-		if (instance >= mxt_obj_instances(object)) {
-			dev_err(dev, "Object instances exceeded!\n");
-			return -EINVAL;
+			if (size > mxt_obj_size(object)) {
+				/*
+			 	* Either we are in fallback mode due to wrong
+			 	* config or config from a later fw version,
+			 	* or the file is corrupt or hand-edited.
+			 	*/
+				dev_warn(dev, "Discarding %zu byte(s) in T%u\n",
+				 	size - mxt_obj_size(object), type);
+			} else if (mxt_obj_size(object) > size) {
+				/*
+			 	* If firmware is upgraded, new bytes may be added to
+			 	* end of objects. It is generally forward compatible
+			 	* to zero these bytes - previous behaviour will be
+			 	* retained. However this does invalidate the CRC and
+			 	* will force fallback mode until the configuration is
+			 	* updated. We warn here but do nothing else - the
+			 	* malloc has zeroed the entire configuration.
+			 	*/
+				dev_warn(dev, "Zeroing %zu byte(s) in T%d\n",
+				 	mxt_obj_size(object) - size, type);
+			}
+
+			if (instance >= mxt_obj_instances(object)) {
+				dev_err(dev, "Object instances exceeded!\n");
+				return -EINVAL;
+			}
 		}
 
 		reg = object->start_address + mxt_obj_size(object) * instance;
@@ -4040,6 +4092,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	u32 calculated_crc = 0;
 	int cfg_version = 0;
 	int cfg_blksize = 0;
+	int num_of_devices = 0;
 	int cfg_enc = 0;
 	char tmp[255];
 	u16 crc_start = 0;
@@ -4074,13 +4127,17 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		dev_info(dev, "Found V3 config file\n");
 		cfg_version = 0x03;
 		cfg.raw_pos = strlen(MXT_CFG_MAGIC_V3);
+	} else if (!strncmp(cfg.raw, MXT_CFG_MAGIC_V4, strlen(MXT_CFG_MAGIC_V4))) {
+		dev_info(dev, "Found V4 config file\n");
+		cfg_version = 0x04;
+		cfg.raw_pos = strlen(MXT_CFG_MAGIC_V4);
 	} else {
 		dev_err(dev, "Unrecognised config file\n");
 		ret = -EINVAL;
 		goto release_raw;
 	}
 
-	if (cfg_version == 0x03) {
+	if ((cfg_version == 0x03) || (cfg_version == 0x04)) {
 		if (sscanf(cfg.raw + cfg.raw_pos, "%s%d%n", tmp, &cfg_enc, &offset) != 2) {
 			dev_err(dev, "Failed to get encryption state\n");
 			goto release_raw;
@@ -4116,7 +4173,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		cfg.raw_pos += offset;
 		
 		if (sscanf(cfg.raw + cfg.raw_pos, "%s%d%n", tmp, &cfg_blksize, &offset) != 2) {
-			dev_err(dev, "Failed to get encryption block \n");
+			dev_err(dev, "Failed to get encryption block");
 		}
 
 		if (!(strcmp("MAX_ENCRYPTION_BLOCKS ",tmp))) {
@@ -4127,6 +4184,18 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		data->enc_blocksize = cfg_blksize * 16;
 
 		cfg.raw_pos += offset;
+
+		if (sscanf(cfg.raw + cfg.raw_pos, "%s%d%n", tmp, &num_of_devices, &offset) != 2) {
+			dev_err(dev, "Failed to get number of devices");
+		}
+
+		if (!(strcmp("DEVICE_NO ", tmp))) {
+			dev_err(dev, "DEVICE_NO header not found");
+			goto release_raw;
+		}
+
+		cfg.raw_pos += offset;
+
 	}
 
 	/* Load 7byte infoblock from config file */
@@ -4152,15 +4221,10 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	}
 
 	/* Compare variant id, file vs chip */
-	if (cfg.info.variant_id != data->info->variant_id) {
-		if (cfg.info.variant_id & 0x80) {
-			/* Just report, encrypted config diff */
-			dev_info(dev, "CFG Variant ID = %d\n", cfg.info.variant_id);
-		} else {
-			dev_err(dev, "Variant ID mismatch!\n");
-			ret = -EINVAL;
-			goto release_raw;
-		}
+	if ((cfg.info.variant_id & 0x7f) != (data->info->variant_id & 0x7f)) {
+		dev_err(dev, "Variant ID mismatch!\n");
+		ret = -EINVAL;
+		goto release_raw;
 	}
 
 	/* Read Infoblock CRCs */
@@ -4200,15 +4264,25 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 			dev_info(dev, "Device config CRC 0x%06X: does not match file CRC 0x%06X: Updating...\n",
 				 data->config_crc, config_crc);
 		}
+	} else if ((cfg.info.variant_id & 0x80) || (cfg_version > 0x02)) {	/* Check if upper MSbit set */
+		dev_warn(dev, "Warning: Infoblock CRC does not match, device encrypted\n");
 	} else {
-		if (cfg.info.variant_id & 0x80) {
-			dev_warn(dev, "Warning: Info CRC does not match, device encrypted\n");
-		} else {
-			dev_warn(dev, "Warning: Info CRC does not match: "
-			"Error - device crc=0x%06X file=0x%06X\nFailed Config Programming\n",
-			 data->info_crc, info_crc);
-			goto release_raw; 
+		dev_warn(dev, "Warning: Infoblock CRC does not match: "
+		"Error - device crc=0x%06X file=0x%06X\nFailed Config Programming\n",
+			data->info_crc, info_crc);
+
+		goto release_raw; 
+	}
+
+	/* Read the Device server or client */
+
+	if (cfg_version == 0x04) {
+		if (sscanf(cfg.raw + cfg.raw_pos, "%s%n", tmp, &offset) != 1) {
+			dev_err(dev, "Failed to find beginning bracket");
 		}
+
+		/* Don't do anything with header, just skip and update position in raw array */
+		cfg.raw_pos += offset;
 	}
 
 	/* Stop T70 Dynamic Configuration before calculation of CRC */
@@ -4276,44 +4350,54 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	msleep(200);	//Allow 200ms before issuing reset
 
-	dev_info(dev, "Interrupt disabled\n");
-	disable_irq(data->irq);
+	if (data->msg_enc_triggered) {
+		disable_irq(data->irq);
+		dev_info(dev, "Interrupt disabled\n");
+	}
 
 	mxt_soft_reset(data, true);
 
-	if ((calculated_crc == data->config_crc) && data->config_crc != 0) {
+	if (!data->msg_enc_triggered) {
+		if ((calculated_crc == data->config_crc) && (data->config_crc != 0)) {
 
-		dev_info(dev, "Calculated config CRC matches device CRC, 0x%06X.\n"
-			"Config successfully updated.", data->config_crc);
+			dev_info(dev, "Calculated config CRC matches device CRC, 0x%06X.\n"
+				"Config successfully updated.", data->config_crc);
 
-	} else if (CHECK_BIT(data->encryption_state, CFG_ENCRYPTED) && 
-		(data->config_crc == config_crc)) {
+		} else if (CHECK_BIT(data->encryption_state, CFG_ENCRYPTED) && 
+			(data->config_crc == config_crc)) {
 			
-		dev_info(dev, "Encrypted device CRC matches file CRC. "
-			"Config successfully updated 0x%06X\n", data->config_crc);
-	} else if ((data->config_crc == 0x00) && (calculated_crc == 0x00)) {
-		dev_info(dev, "Device and calculated CRC equal to zero. "
-			"Device config content has been erased.");
+			dev_info(dev, "Encrypted device CRC matches file CRC. "
+				"Config successfully updated 0x%06X\n", data->config_crc);
+		} else if ((data->config_crc == 0x00) && (calculated_crc == 0x00)) {
+			dev_info(dev, "Device and calculated CRC equal to zero. "
+				"Device config content has been erased.");
+		} else {
+			dev_warn(dev, "Device CRC 0x%06X does not match calculated CRC 0x%06X\n"
+			"or config file CRC 0x%06X",
+			data->config_crc, calculated_crc, config_crc);
+		}
+	}
+
+	ret = mxt_read_info_block(data);
+	if (ret) {
+		dev_err(dev, "Read Info Block failed\n");
 	} else {
-		dev_warn(dev, "Device CRC 0x%06X does not match calculated CRC 0x%06X\n"
-		"or config file CRC 0x%06X",
-		data->config_crc, calculated_crc, config_crc);
+		dev_info(dev, "Read Infoblock successful\n");
 	}
 	
-	ret = mxt_read_info_block(data);
-	
-	mxt_check_encryption(data);
+	ret = mxt_check_encryption(data);
+	if (ret) {
+		dev_dbg(dev, "Check encryption state failed\n");
+	} else {
+		dev_info(dev, "Check encryption state successful\n");
+	}
 
-	dev_info(dev, "Interrupt enabled\n");
-	enable_irq(data->irq);
+	if (data->msg_enc_triggered) {
+		enable_irq(data->irq);
+		dev_info(dev, "Interrupt enabled\n");
+	}
 
 	mxt_print_info_block(data);
-
-	if (!ret) {
-		dev_dbg(dev, "Read Info Block success\n");
-	} else {
-		dev_err(dev, "Read Info Block failed(%d), checking for bootloader mode.\n", error);
-	}
 
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENCRYPTED))) {
 	/* T7 config may have changed */
@@ -4331,6 +4415,8 @@ release_mem:
 	kfree(cfg.mem);
 release_raw:
 	kfree(cfg.raw);
+
+	data->msg_enc_triggered = false;
 
 	return ret;
 }
@@ -4470,11 +4556,12 @@ static int mxt_parse_object_table(struct mxt_data *data,
 	u8 reportid;
 	u16 end_address;
 	u8 num_instances;
+	u16 obj_size;
+	u16 total_obj_size = 0;
 
 	/* Valid Report IDs start counting from 1 */
 	reportid = 1;
 	data->mem_size = 0;
-	data->num_datasize_bytes = 0;
 
 	for (i = 0; i < data->info->object_num; i++) {
 		struct mxt_object *object = object_table + i;
@@ -4484,8 +4571,21 @@ static int mxt_parse_object_table(struct mxt_data *data,
 
 		num_instances = mxt_obj_instances(object);
 
-		data->num_datasize_bytes += num_instances * 2;
+		/* For each obj, size is increased by padding */
+		/* then multiplied by each instance */
+		if (((u16)(mxt_obj_size(object) % 16) == 0x0000) && 
+			((u16)(mxt_obj_size(object) != 0x0000))) {
+
+			obj_size = (u16)(mxt_obj_size(object));
+		} else {
+			obj_size = ((16 - (u16)(mxt_obj_size(object) % 16)) +
+				mxt_obj_size(object));
+		}
 		
+		/* Total physical size of encrypted cfg */
+		/* With embedded datasize bytes and instance */
+		obj_size = (obj_size * num_instances) + 2;
+
 		if (object->num_report_ids) {
 			min_id = reportid;
 			reportid += object->num_report_ids *
@@ -4686,12 +4786,17 @@ static int mxt_parse_object_table(struct mxt_data *data,
 		if (end_address >= data->mem_size)
 			data->mem_size = end_address + 1;
 
+		/* Keep track for possible encrypted object */
+		total_obj_size += obj_size;
+
+
 	} /* End of for loop */
 
 	/* TBD Need to do if chip is encrypted, but mem_size too large  */
-	if (CHECK_BIT(data->encryption_state, CFG_ENCRYPTED)) {
-		data->mem_size += data->num_datasize_bytes;
+	if (CHECK_BIT(data->encryption_state, DEV_ENCRYPTED)) {
+		data->mem_size = total_obj_size;
 	}
+
 	/* Store maximum reportid */
 	data->max_reportid = reportid;
 	
@@ -4702,6 +4807,8 @@ static int mxt_parse_object_table(struct mxt_data *data,
 	}
 
 	if (CHECK_BIT(data->encryption_state, MSG_ENCRYPTED)) {
+		/* Increase buff to be 16 + 2 data size bytes */
+		/* one message at a time, TBD - block of 48 bytes later */
 		data->T5_msg_buf = kcalloc(data->max_reportid, 
 			18, GFP_KERNEL);
 	} else {
@@ -4946,6 +5053,7 @@ static int mxt_read_info_block(struct mxt_data *data)
 	//Possible relocation of this to get info on chip before CRC
 	data->info = (struct mxt_info *)id_buf;
 	
+	/* May want to removed, duplicate if using mxt-app- else okay */
 	dev_dbg(&client->dev,
 		 "Family: %u Variant: %u Firmware V%u.%u.%02X Objects: %u\n",
 		 data->info->family_id, data->info->variant_id,
@@ -6970,18 +7078,9 @@ static ssize_t mxt_reset_store(struct device *dev,
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 	u8 i;
-	ssize_t ret = 0;
 
 	if (kstrtou8(buf, 0, &i) == 0) {
-	
-		data->mxt_reset_state = true;
-
-		ret = mxt_soft_reset(data, true);
-
-		data->mxt_reset_state = false;
-		
-	} else {
-		data->mxt_reset_state = false;
+		mxt_soft_reset(data, true);
 	}
 
 	return count;
@@ -7202,6 +7301,8 @@ static int mxt_check_mem_access_params(struct mxt_data *data, loff_t off,
 		return -EIO;
 	}
 
+	/* Needed if changing encryption state using mxtapp */
+	/* Indicates to driver to check encryption steate */
 	if (off == 0x00) {
 		mxt_read_info_block(data);
 	}
@@ -7209,8 +7310,11 @@ static int mxt_check_mem_access_params(struct mxt_data *data, loff_t off,
 	if (off + *count > data->mem_size)
 		*count = data->mem_size - off;
 
-	if (*count > MXT_MAX_BLOCK_WRITE)
-		*count = MXT_MAX_BLOCK_WRITE;
+	/* TBD - DEV or CFG only check */
+	if (!(CHECK_BIT(data->encryption_state, DEV_ENCRYPTED))) {
+		if (*count > MXT_MAX_BLOCK_WRITE)
+			*count = MXT_MAX_BLOCK_WRITE;
+	}
 
 	return 0;
 }
@@ -7247,7 +7351,9 @@ static ssize_t mxt_mem_access_write(struct file *filp, struct kobject *kobj,
 	int ret = 0;
 	u8 flag = 0;
 
-	if (CHECK_BIT(data->encryption_state, CFG_ENCRYPTED)) {
+	/* TBD - Verify that CFG_ENCRYPTED is enough here */
+	/* Only check for CFG encrypted, not needed if MSG encrypted */
+	if (CHECK_BIT(data->encryption_state, DEV_ENCRYPTED)) {
 		flag = F_W_SYSFS_ID;
 	}
 
@@ -7349,10 +7455,7 @@ static int mxt_sysfs_init(struct mxt_data *data)
 	data->mem_access_attr.read = mxt_mem_access_read;
 	data->mem_access_attr.write = mxt_mem_access_write;
 
-	if (data->T2_address)
-		data->mem_access_attr.size = data->mem_size + data->num_datasize_bytes;
-	else
-		data->mem_access_attr.size = data->mem_size;
+	data->mem_access_attr.size = data->mem_size;
 
 	error = sysfs_create_bin_file(&client->dev.kobj,
 				  &data->mem_access_attr);
@@ -7400,20 +7503,23 @@ static void mxt_start(struct mxt_data *data)
 
 	case MXT_SUSPEND_DEEP_SLEEP:
 	default:
-		data->irq_processing = false;
+
+		//data->irq_processing = false;
 
 		if (!(CHECK_BIT(data->encryption_state, CFG_ENCRYPTED))) {
 			mxt_set_t7_power_cfg(data, MXT_POWER_CFG_RUN);
 		}
 
 		/* Recalibrate since chip has been in deep sleep */
-		mxt_t6_command(data, MXT_COMMAND_CALIBRATE, 1, false);
+		if (!(CHECK_BIT(data->encryption_state, CFG_ENCRYPTED))) {
+			mxt_t6_command(data, MXT_COMMAND_CALIBRATE, 1, false);
+		}
 
 		msleep(100); 	//Wait for calibration command
 		mutex_lock(&data->rd_msg_lock);
 		mxt_process_messages_until_invalid(data);
 		mutex_unlock(&data->rd_msg_lock);
-		data->irq_processing = true;
+		//data->irq_processing = true;
 
 		break;
 	}
@@ -7436,14 +7542,14 @@ static void mxt_stop(struct mxt_data *data)
 	case MXT_SUSPEND_DEEP_SLEEP:
 
 	default:
-		data->irq_processing = false;
+		//data->irq_processing = false;
 
 		if (!(CHECK_BIT(data->encryption_state, CFG_ENCRYPTED))) {
 			mxt_set_t7_power_cfg(data, MXT_POWER_CFG_DEEPSLEEP);
 			msleep(100); 	//Wait for calibration command
 		}
 
-		data->irq_processing = true;
+		//data->irq_processing = true;
 
 		break;
 	}

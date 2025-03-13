@@ -6489,10 +6489,9 @@ static ssize_t mxt_reset_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
-	u8 i;
 	ssize_t ret = 0;
 
-	if (kstrtou8(buf, 0, &i) == 0) {
+	if (data->mxt_reset_state == false) {
 	
 		data->mxt_reset_state = true;
 

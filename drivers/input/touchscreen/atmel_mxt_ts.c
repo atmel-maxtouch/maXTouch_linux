@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20240123"
+#define DRIVER_VERSION_NUMBER "4.19-20250314"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -620,7 +620,7 @@ struct mxt_data {
 	u8 T38_obj_size;
 	u16 T71_address;
 	u8 T9_reportid_min;
-	u8 T9_reportid_max;
+	int T9_reportid_max;
 	u8 T15_reportid_min;
 	u8 T15_reportid_max;
 	u16 T18_address;
@@ -874,8 +874,8 @@ static ssize_t mxt_debug_msg_read(struct file *filp, struct kobject *kobj,
 {
 	struct device *dev = container_of(kobj, struct device, kobj);
 	struct mxt_data *data = dev_get_drvdata(dev);
-	int count;
-	size_t bytes_read;
+	size_t count;
+	size_t bytes_read = 0;
 
 	if (!data->debug_msg_data) {
 		dev_err(dev, "No buffer!\n");
@@ -892,7 +892,11 @@ static ssize_t mxt_debug_msg_read(struct file *filp, struct kobject *kobj,
 	if (count > data->debug_msg_count)
 		count = data->debug_msg_count;
 
-	bytes_read = count * data->T5_msg_size;
+	if ((count * data->T5_msg_size) > PAGE_SIZE) {
+		dev_err(dev, "Message size is over limit\n");
+	} else {
+		bytes_read = count * data->T5_msg_size;
+	}
 
 	memcpy(buf, data->debug_msg_data, bytes_read);
 	data->debug_msg_count = 0;
@@ -1375,11 +1379,8 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 
 		ret = i2c_master_send(client, buf, count);
 
-		if (ret == count) {
-			ret = 0;
-		} else {
+		if (ret != count) {
 			ret = -EIO;
-
 			dev_err(&client->dev, "%s: i2c send failed (%d)\n",
 				__func__, ret);
 			mxt_update_seq_num(data, true, buf[2]);
@@ -1484,11 +1485,11 @@ static int __mxt_write_reg(struct i2c_client *client, u16 reg, u16 len,
 			msg_count = message_length + 4;
 
 			/* Copy all data to buf */
-			memcpy(&buf[4], (val + bytesWritten), msg_count);
+			memcpy(&buf[4], (val + bytesWritten), len);
 
 		} else {
 			msg_count = message_length + 2;
-			memcpy(&buf[2], val, msg_count);
+			memcpy(&buf[2], val, len);
 		}
 
 		ret = i2c_master_send(client, buf, msg_count);
@@ -1693,6 +1694,11 @@ static int mxt_check_encryption(struct mxt_data *data)
 			ret = __mxt_read_reg_crc(client, data->T2_address, 1, &val, data, true);
 		}
 
+		if (ret) {
+			dev_info(dev, "Could not read from T2 address");
+			return -EIO;
+		}
+
 		if ((val[0] & MSGENCEN) || (val[0] & CONFIGENCEN)) {
 			data->encryption_state |= DEV_ENCRYPTED;
 
@@ -1720,6 +1726,11 @@ static int mxt_check_encryption(struct mxt_data *data)
 				3, &val, data, true);
 		}
 
+		if (ret) {
+			dev_info(dev, "Could not read from T2 address");
+			return -EIO;
+		}
+
 		checksum = (val[0] | (val[1] << 8) | (val[2] << 16));
 
 		dev_info(dev, "T2 Payload CRC = 0x%06X", checksum);
@@ -1730,6 +1741,11 @@ static int mxt_check_encryption(struct mxt_data *data)
 		} else {
 			ret = __mxt_read_reg_crc(client, data->T2_address + T2_ENCKEYCRC_OFFSET,
 				3, &val, data, true);
+		}
+
+		if (ret) {
+			dev_info(dev, "Could not read from T2 address");
+			return -EIO;
 		}
 
 		checksum = (val[0] | (val[1] << 8) | (val[2] << 16));
@@ -2755,6 +2771,11 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 			data->T5_msg_size, data->msg_buf + 1, data, true);
 	}
 
+	if (ret) {
+		dev_dbg(dev, "Failed to read T5, (%d)\n", ret);
+		return IRQ_HANDLED;
+	}
+
 	/*
 	 * This condition may be caused by the CHG line being configured in
 	 * Mode 0. It results in unnecessary I2C operations but it is benign.
@@ -2770,12 +2791,20 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 		return IRQ_HANDLED;
 	}
 
+	if (ret) {
+		dev_dbg(dev, "Error occurred during resync (%d)\n", ret);
+		return IRQ_HANDLED;
+	}
+
 	if (count > data->max_reportid) {
 		dev_warn(dev, "T44/T144 count %d exceeded max report id\n", count);
 
 		if (data->crc_enabled && data->is_resync_enabled) {
 			// Recovery requires RETRIGEN bit to be enabled in config
 			ret = mxt_resync_comm(data);
+			if (ret) {
+				dev_dbg(dev, "Error occurred during resync (%d)\n", ret);
+			}
 		}
 
 		return IRQ_HANDLED;
@@ -3149,10 +3178,10 @@ static int mxt_t68_write_datatype(struct mxt_data *data)
 	
 	if (!data->crc_enabled) {
 		ret = __mxt_write_reg(client, data->T68_address + T68_DTYPE_OFFSET,
-			sizeof(buf), &buf, data); 
+			2, &buf, data);
 	} else {
 		ret = __mxt_write_reg_crc(client, data->T68_address + T68_DTYPE_OFFSET,
-			sizeof(buf), &buf, data, 0);
+			2, &buf, data, 0);
 	}
 
 	return ret;
@@ -3297,10 +3326,10 @@ static int mxt_t68_zero_data(struct mxt_data *data)
 
 	if (!data->crc_enabled) {
 		ret = __mxt_write_reg(client, data->T68_address + T68_DATA_OFFSET,
-			sizeof(zeros), zeros, data); 
+			data->t68_datasize, zeros, data);
 	} else {
 		ret = __mxt_write_reg_crc(client, data->T68_address + T68_DATA_OFFSET,
-			sizeof(zeros), zeros, data, 0);
+			data->t68_datasize, zeros, data, 0);
 	}
 
 	return ret;
@@ -3372,16 +3401,18 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 {
 	struct device *dev = &data->client->dev;
 	struct mxt_object *object;
-	unsigned int type, instance, size, byte_offset = 0;
+	unsigned int type, instance, size;
 	unsigned int bytesperline = 0;
 	int offset, tmp_offset, write_offset = 0;
 	int totalBytesToWrite = 0;
 	unsigned int first_obj_type = 0;
 	unsigned int first_obj_addr = 0;
-	int ret, i, error;
+	int ret, error;
+	int byte_offset = 0;
 	char newline;
 	u8 tmpval, val;
 	u16 reg;
+	int i = 0;
 
 	cfg->object_skipped_ofs = 0;
 
@@ -3403,7 +3434,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 		object = mxt_get_object(data, type);
 
 		/* Find first object in cfg file; if not first in device */
-		if (first_obj_type == 0) {
+		if (first_obj_type == 0 && object != NULL) {
 			first_obj_type = type;
 			first_obj_addr = object->start_address;
 
@@ -3467,6 +3498,11 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 			}
 
 			error = mxt_upload_t68_payload(data, cfg);
+
+			if (error) {
+				dev_err(dev, "T68 payload upload reported error,"
+					" may result in unexpected behavior");
+			}
 
 			continue;
 		}
@@ -3541,6 +3577,12 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 				/* Get number of bytes in line */
 				ret = sscanf(cfg->raw + cfg->tmp_raw_pos, "%hhx%c%n",
 					&tmpval, &newline, &tmp_offset);
+
+				if (ret != 2) {
+					dev_err(dev, "Bad format in T%d at %d\n",
+						type, i);
+					return -EINVAL;
+				}
 				
 				bytesperline++;	
 
@@ -4137,7 +4179,7 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			data->multitouch = MXT_TOUCH_MULTI_T9;
 			/* Only handle messages from first T9 instance */
 			data->T9_reportid_min = min_id;
-			data->T9_reportid_max = min_id +
+			data->T9_reportid_max = (int) min_id +
 						object->num_report_ids - 1;
 			data->num_touchids = object->num_report_ids;
 			break;
@@ -4234,7 +4276,8 @@ static int mxt_parse_object_table(struct mxt_data *data,
 			data->T100_reportid_max = max_id;
 			data->T100_instances = num_instances;
 			/* first two report IDs reserved */
-			data->num_touchids = object->num_report_ids - MXT_RSVD_RPTIDS;
+			if (object->num_report_ids != 0)
+				data->num_touchids = object->num_report_ids - MXT_RSVD_RPTIDS;
 			break;
 		case MXT_PROCI_ACTIVESTYLUS_T107:
 			data->T107_address = object->start_address;
@@ -5458,10 +5501,10 @@ static int mxt_set_t7_power_cfg(struct mxt_data *data, u8 sleep)
 
 	if (!(data->crc_enabled)) {
 		error = __mxt_write_reg(data->client, data->T7_address,
-			sizeof(data->t7_cfg), new_config, data);
+			2, new_config, data);
 	} else {
 		error = __mxt_write_reg_crc(data->client, data->T7_address,
-			sizeof(data->t7_cfg), new_config, data, 0);
+			2, new_config, data, 0);
 	}
 
 	if (error)
@@ -6211,7 +6254,7 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	ret = request_firmware(&fw, fn, dev);
 	if (ret) {
 		dev_err(dev, "Unable to open firmware %s\n", fn);
-		return ret;
+		goto release_firmware;
 	} else {
 
 		dev_info(dev, "Opened firmware file: %s\n", fn);

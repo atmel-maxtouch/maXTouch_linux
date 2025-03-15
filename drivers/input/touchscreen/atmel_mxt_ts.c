@@ -6499,8 +6499,6 @@ static ssize_t mxt_reset_store(struct device *dev,
 
 		data->mxt_reset_state = false;
 		
-	} else {
-		data->mxt_reset_state = false;
 	}
 
 	return count;

@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250327"
+#define DRIVER_VERSION_NUMBER "4.19-20250401"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -2047,7 +2047,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 	
 	/* Get other auxdata[] bytes if present */
 	
-	if (status & MXT_T100_DETECT) {
+	if (status & MXT_T100_TYPE_MASK) {
 		type = (status & MXT_T100_TYPE_MASK) >> 4;
 
 		switch (type) {
@@ -2159,12 +2159,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 		  	input_report_abs(input_dev_sec, ABS_MT_PRESSURE, pressure);
 		  	input_report_abs(input_dev_sec, ABS_MT_DISTANCE, distance);
 		  	input_report_abs(input_dev_sec, ABS_MT_ORIENTATION, orientation);
-			
-			if (id == MXT_MIN_RPTID_SEC) {
-				input_report_abs(input_dev_sec, ABS_X, x);
-				input_report_abs(input_dev_sec, ABS_Y, y);
-				input_report_key(input_dev_sec, BTN_TOUCH, 1);
-			}
+
 		} else {
 		  	input_mt_report_slot_state(input_dev, tool, 1);
 		  	input_report_abs(input_dev, ABS_MT_POSITION_X, x);
@@ -2173,20 +2168,37 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 		  	input_report_abs(input_dev, ABS_MT_PRESSURE, pressure);
 		  	input_report_abs(input_dev, ABS_MT_DISTANCE, distance);
 		  	input_report_abs(input_dev, ABS_MT_ORIENTATION, orientation);
+
 		}
 	} else {
 		 
-		if (id >= MXT_MIN_RPTID_SEC){
+		if (id >= MXT_MIN_RPTID_SEC) {
+			/* Send last coordinate, then release touch */
+			input_mt_report_slot_state(input_dev_sec, tool, 1);
+		  	input_report_abs(input_dev_sec, ABS_MT_POSITION_X, x);
+		  	input_report_abs(input_dev_sec, ABS_MT_POSITION_Y, y);
+		  	input_report_abs(input_dev_sec, ABS_MT_TOUCH_MAJOR, major);
+		  	input_report_abs(input_dev_sec, ABS_MT_PRESSURE, pressure);
+		  	input_report_abs(input_dev_sec, ABS_MT_DISTANCE, distance);
+		  	input_report_abs(input_dev_sec, ABS_MT_ORIENTATION, orientation);
+
 			dev_dbg(dev, "[%u] release\n", id_sec);
 
 			/* close out slot */
 			input_mt_report_slot_state(input_dev_sec, 0, 0);
 
-			/* Set BTN_TOUCH to 0 */
-			if (id == MXT_MIN_RPTID_SEC)
-				input_report_key(input_dev_sec, BTN_TOUCH, 0);
-
 		} else {
+			/* Send last coordinate, then release touch */
+			dev_dbg(dev, "Send last coordinate");
+
+			input_mt_report_slot_state(input_dev, tool, 1);
+		  	input_report_abs(input_dev, ABS_MT_POSITION_X, x);
+		  	input_report_abs(input_dev, ABS_MT_POSITION_Y, y);
+		  	input_report_abs(input_dev, ABS_MT_TOUCH_MAJOR, major);
+		  	input_report_abs(input_dev, ABS_MT_PRESSURE, pressure);
+		  	input_report_abs(input_dev, ABS_MT_DISTANCE, distance);
+		  	input_report_abs(input_dev, ABS_MT_ORIENTATION, orientation);
+
 			dev_dbg(dev, "[%u] release\n", id);
 
 			/* close out slot */
@@ -6953,6 +6965,7 @@ static int mxt_parse_device_properties(struct mxt_data *data)
 	int error;
 
 	data->is_resync_enabled = false;
+	data->T5_msg_crc_enabled = false;
 
 	if (device_property_present(dev, keymap_property)) {
 		n_keys = device_property_read_u32_array(dev, keymap_property,

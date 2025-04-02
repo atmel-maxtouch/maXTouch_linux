@@ -936,11 +936,26 @@ static int mxt_wait_for_completion(struct mxt_data *data,
 	unsigned long timeout = msecs_to_jiffies(timeout_ms);
 	long ret;
 
+	/* Initialize debug message variable */
+	char *debug_msg = NULL;
+
+	if (comp == &data->bl_completion) {
+		debug_msg = "bl_completion";
+	} else if (comp == &data->reset_completion) {
+		debug_msg = "reset_completion";
+	} else if (comp == &data->crc_completion) {
+		debug_msg = "crc_completion";
+	} else if (comp == &data->t68_completion) {
+		debug_msg = "t68_completion";
+	} else {
+		debug_msg = "unknown_completion";
+	}
+	
 	ret = wait_for_completion_interruptible_timeout(comp, timeout);
 	if (ret > 0) {
 		dev_dbg(dev, "Time left in jiffies %li", ret);
 	} else if (ret == 0) {
-		dev_err(dev, "Wait for completion timed out.\n");
+		dev_err(dev, "[%s] Wait for completion timed out.\n", debug_msg);
 		return -ETIMEDOUT;
 	} else if (ret == -ERESTARTSYS) {
 		dev_warn(dev, "Completion event was interrupted\n");

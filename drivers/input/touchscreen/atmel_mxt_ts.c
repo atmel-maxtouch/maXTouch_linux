@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250401"
+#define DRIVER_VERSION_NUMBER "4.19-20250403"
 
 #include <linux/version.h>
 #include <linux/acpi.h>

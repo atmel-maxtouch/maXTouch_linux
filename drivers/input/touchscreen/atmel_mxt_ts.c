@@ -2214,6 +2214,9 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 		  	input_report_abs(input_dev, ABS_MT_DISTANCE, distance);
 		  	input_report_abs(input_dev, ABS_MT_ORIENTATION, orientation);
 
+			input_report_abs(input_dev, ABS_X, x);
+			input_report_abs(input_dev, ABS_Y, y);
+
 			dev_dbg(dev, "[%u] release\n", id);
 
 			/* close out slot */
@@ -2853,7 +2856,7 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 		/* Read first T5 message for HA device */
 		ret = __mxt_read_reg_crc(data->client, data->T5_address,
 			data->T5_msg_size, data->msg_buf + 1, data, true);
-		} else {
+		} else if (data->T5_msg_crc_enabled) {
 			ret = __mxt_read_reg(data, data->T5_address,
 				data->T5_msg_size, data->msg_buf + 1);
 		}

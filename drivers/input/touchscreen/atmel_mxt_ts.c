@@ -16,7 +16,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250405"
+#define DRIVER_VERSION_NUMBER "4.19-20250408"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -2585,8 +2585,6 @@ static void mxt_backup_config(struct mxt_data *data, u8 cmd, u8 value,
 		reinit_completion(&data->crc_completion);
 
 	mxt_t6_command(data, cmd, value, true);
-
-	msleep(5);
 
 	/*
 	 * Wait for crc message. On failure, CRC is set to 0 and config will
@@ -5978,8 +5976,8 @@ static int mxt_vidioc_querycap(struct file *file, void *priv,
 {
 	struct mxt_data *data = video_drvdata(file);
 
-	strlcpy(cap->driver, "atmel_mxt_ts", sizeof(cap->driver));
-	strlcpy(cap->card, "atmel_mxt_ts touch", sizeof(cap->card));
+	strscpy(cap->driver, "atmel_mxt_ts", sizeof(cap->driver));
+	strscpy(cap->card, "atmel_mxt_ts touch", sizeof(cap->card));
 	snprintf(cap->bus_info, sizeof(cap->bus_info),
 		 "I2C:%s", dev_name(&data->client->dev));
 	return 0;
@@ -5995,11 +5993,11 @@ static int mxt_vidioc_enum_input(struct file *file, void *priv,
 
 	switch (i->index) {
 	case MXT_V4L_INPUT_REFS:
-		strlcpy(i->name, "Mutual Capacitance References",
+		strscpy(i->name, "Mutual Capacitance References",
 			sizeof(i->name));
 		break;
 	case MXT_V4L_INPUT_DELTAS:
-		strlcpy(i->name, "Mutual Capacitance Deltas", sizeof(i->name));
+		strscpy(i->name, "Mutual Capacitance Deltas", sizeof(i->name));
 		break;
 	}
 
@@ -6205,26 +6203,23 @@ static void mxt_debug_init(struct mxt_data *data)
 }
 #endif
 
-static void
-atmel_mxt_ts_prepare_debugfs(struct mxt_data *data, const char *debugfs_name)
+static void atmel_mxt_ts_prepare_debugfs(struct mxt_data *data,
+					 const char *debugfs_name)
 {
-
 	data->debug_dir = debugfs_create_dir(debugfs_name, NULL);
 	if (!data->debug_dir)
 		return;
-
-	debugfs_create_x8("tx_seq_num", S_IRUGO | S_IWUSR, data->debug_dir,
+	/* 4(read), 2(write), 1(exe) */
+	debugfs_create_x8("tx_seq_num", 0644, data->debug_dir,
 			  &data->msg_num.txseq_num);
-	debugfs_create_bool("debug_irq", S_IRUGO | S_IWUSR, data->debug_dir,
+	debugfs_create_bool("debug_irq", 0644, data->debug_dir,
 			    &data->irq_processing);
-	debugfs_create_bool("crc_enabled", S_IRUGO, data->debug_dir,
+	debugfs_create_bool("crc_enabled", 0444, data->debug_dir,
 			    &data->crc_enabled);
 }
 
-static void
-atmel_mxt_ts_teardown_debugfs(struct mxt_data *data)
+static void atmel_mxt_ts_teardown_debugfs(struct mxt_data *data)
 {
-
 	debugfs_remove_recursive(data->debug_dir);
 }
 
@@ -6312,7 +6307,7 @@ static int mxt_configure_objects(struct mxt_data *data,
 }
 
 /* Configuration crc check sum is returned as hex xxxxxx */
-static ssize_t mxt_config_crc_show(struct device *dev,
+static ssize_t config_crc_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6321,7 +6316,7 @@ static ssize_t mxt_config_crc_show(struct device *dev,
 }
 
 /* Firmware Version is returned as Major.Minor.Build */
-ssize_t mxt_fw_version_show(struct device *dev,
+ssize_t fw_version_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6331,7 +6326,7 @@ ssize_t mxt_fw_version_show(struct device *dev,
 			 info->version >> 4, info->version & 0xf, info->build);
 }
 
-static ssize_t mxt_tx_seq_number_store(struct device *dev,
+static ssize_t tx_seq_number_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6352,7 +6347,7 @@ static ssize_t mxt_tx_seq_number_store(struct device *dev,
 }
 
 /* Returns current tx_seq number */
-static ssize_t mxt_tx_seq_number_show(struct device *dev,
+static ssize_t tx_seq_number_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6361,7 +6356,7 @@ static ssize_t mxt_tx_seq_number_show(struct device *dev,
 }
 
 /* Hardware Version is returned as FamilyID.VariantID */
-static ssize_t mxt_hw_version_show(struct device *dev,
+static ssize_t hw_version_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6390,7 +6385,7 @@ static ssize_t mxt_show_instance(char *buf, int count,
 	return count;
 }
 
-static ssize_t mxt_object_show(struct device *dev,
+static ssize_t objects_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6464,27 +6459,33 @@ static int mxt_check_firmware_format(struct device *dev,
 
 #ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
 
-static ssize_t mxt_diagnostic_msg_show(struct device *dev,
+static ssize_t diagnostic_msg_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
 	int count = 0;
 	int i;
 
-	mutex_lock(&data->diag_msg_lock);
+	if (data->T33_address) {
+		mutex_lock(&data->diag_msg_lock);
 
-	for (i = 0; i < 41; i++) {
-		if (i < 40)
-			count += scnprintf(buf + count, PAGE_SIZE - count,
-				"%02x,", data->t33_msg_buf[i]);
+		for (i = 0; i < 41; i++) {
+			if (i < 40)
+				count += scnprintf(buf + count,
+						   PAGE_SIZE - count,
+						   "%02x,",
+						   data->t33_msg_buf[i]);
 
-		if (i == 40) {
-			count += scnprintf(buf + count, PAGE_SIZE - count,
-				"%02x\n", data->t33_msg_buf[i]);
+			if (i == 40) {
+				count += scnprintf(buf + count,
+						   PAGE_SIZE - count,
+						   "%02x\n",
+						   data->t33_msg_buf[i]);
+			}
 		}
-	}
 
-	mutex_unlock(&data->diag_msg_lock);
+		mutex_unlock(&data->diag_msg_lock);
+}
 
 	return count;
 }
@@ -6652,7 +6653,7 @@ static int mxt_update_file_name(struct device *dev, char **file_name,
 	return 0;
 }
 
-static ssize_t mxt_update_fw_store(struct device *dev,
+static ssize_t update_fw_store(struct device *dev,
 				   struct device_attribute *attr,
 				   const char *buf, size_t count)
 {
@@ -6719,7 +6720,7 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	return count;
 }
 
-static ssize_t mxt_update_cfg_store(struct device *dev,
+static ssize_t update_cfg_store(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -6766,7 +6767,7 @@ out:
 	return ret;
 }
 
-static ssize_t mxt_reset_show(struct device *dev,
+static ssize_t reset_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6776,7 +6777,7 @@ static ssize_t mxt_reset_show(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%c\n", c);
 }
 
-static ssize_t mxt_reset_store(struct device *dev,
+static ssize_t reset_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6795,7 +6796,7 @@ static ssize_t mxt_reset_store(struct device *dev,
 	return count;
 }
 
-static ssize_t mxt_crc_enabled_show(struct device *dev,
+static ssize_t crc_enabled_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6805,7 +6806,7 @@ static ssize_t mxt_crc_enabled_show(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%c\n", c);
 }
 
-static ssize_t mxt_debug_irq_show(struct device *dev,
+static ssize_t debug_irq_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6815,7 +6816,7 @@ static ssize_t mxt_debug_irq_show(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%c\n", c);
 }
 
-static ssize_t mxt_debug_enable_show(struct device *dev,
+static ssize_t debug_enable_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6825,7 +6826,7 @@ static ssize_t mxt_debug_enable_show(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%c\n", c);
 }
 
-static ssize_t mxt_debug_notify_show(struct device *dev,
+static ssize_t debug_notify_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	return sprintf(buf, "0\n");
@@ -6853,7 +6854,7 @@ static ssize_t mxt_debug_v2_enable_store(struct device *dev,
 	return ret;
 }
 
-static ssize_t mxt_debug_enable_store(struct device *dev,
+static ssize_t debug_enable_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6873,7 +6874,7 @@ static ssize_t mxt_debug_enable_store(struct device *dev,
 	return ret;
 }
 
-static ssize_t mxt_debug_irq_store(struct device *dev,
+static ssize_t debug_irq_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct mxt_data *data = dev_get_drvdata(dev);
@@ -6956,29 +6957,26 @@ static ssize_t mxt_mem_access_write(struct file *filp, struct kobject *kobj,
 	return ret == 0 ? count : ret;
 }
 
-static DEVICE_ATTR(fw_version, S_IRUGO, mxt_fw_version_show, NULL);
-static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
-static DEVICE_ATTR(tx_seq_num, S_IWUSR | S_IRUSR, mxt_tx_seq_number_show,
-		   mxt_tx_seq_number_store);
-static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
-
+static DEVICE_ATTR_RO(fw_version);
+static DEVICE_ATTR_RO(hw_version);
+static DEVICE_ATTR_RO(objects);
+static DEVICE_ATTR_RO(crc_enabled);
+static DEVICE_ATTR_RO(debug_notify);
+static DEVICE_ATTR_RO(config_crc);
 #ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
-static DEVICE_ATTR(diagnostic_msg, S_IRUGO, mxt_diagnostic_msg_show, NULL);
+static DEVICE_ATTR_RO(diagnostic_msg);
 #endif
 
-static DEVICE_ATTR(update_cfg, S_IWUSR, NULL, mxt_update_cfg_store);
-static DEVICE_ATTR(config_crc, S_IRUGO, mxt_config_crc_show, NULL);
-static DEVICE_ATTR(update_fw, S_IWUSR, NULL, mxt_update_fw_store);
-static DEVICE_ATTR(debug_enable, S_IWUSR | S_IRUSR, mxt_debug_enable_show,
-		   mxt_debug_enable_store);
-static DEVICE_ATTR(debug_v2_enable, S_IWUSR | S_IRUSR, NULL,
-		   mxt_debug_v2_enable_store);
-static DEVICE_ATTR(debug_notify, S_IRUGO, mxt_debug_notify_show, NULL);
-static DEVICE_ATTR(debug_irq, S_IWUSR | S_IRUSR, mxt_debug_irq_show,
-		   mxt_debug_irq_store);
-static DEVICE_ATTR(crc_enabled, S_IRUGO, mxt_crc_enabled_show, NULL);
-static DEVICE_ATTR(mxt_reset, S_IWUSR | S_IRUSR, mxt_reset_show,
-		   mxt_reset_store);
+static DEVICE_ATTR_WO(update_cfg);
+static DEVICE_ATTR_WO(update_fw);
+
+static DEVICE_ATTR(tx_seq_num, 0600, tx_seq_number_show,
+		   tx_seq_number_store);
+static DEVICE_ATTR(debug_v2_enable, 0600, NULL, mxt_debug_v2_enable_store);
+static DEVICE_ATTR(debug_enable, 0600, debug_enable_show,
+		   debug_enable_store);
+static DEVICE_ATTR(debug_irq, 0600, debug_irq_show, debug_irq_store);
+static DEVICE_ATTR(mxt_reset, 0600, reset_show, reset_store);
 
 static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
@@ -6986,7 +6984,7 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_tx_seq_num.attr,
 	&dev_attr_debug_irq.attr,
 	&dev_attr_crc_enabled.attr,
-	&dev_attr_object.attr,
+	&dev_attr_objects.attr,
 	&dev_attr_update_cfg.attr,
 	&dev_attr_config_crc.attr,
 	&dev_attr_update_fw.attr,
@@ -7018,13 +7016,13 @@ static int mxt_sysfs_init(struct mxt_data *data)
 
 	sysfs_bin_attr_init(&data->mem_access_attr);
 	data->mem_access_attr.attr.name = "mem_access";
-	data->mem_access_attr.attr.mode = S_IRUGO | S_IWUSR;
+	data->mem_access_attr.attr.mode = 0644;
 	data->mem_access_attr.read = mxt_mem_access_read;
 	data->mem_access_attr.write = mxt_mem_access_write;
 	data->mem_access_attr.size = data->mem_size;
 
 	error = sysfs_create_bin_file(&client->dev.kobj,
-				  &data->mem_access_attr);
+				      &data->mem_access_attr);
 	if (error) {
 		dev_err(&client->dev, "Failed to create %s\n",
 			data->mem_access_attr.attr.name);

@@ -16,7 +16,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250501"
+#define DRIVER_VERSION_NUMBER "4.19-20250516"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -221,7 +221,7 @@
 #define T68_LENGTH_OFFSET		5
 #define T68_DATA_OFFSET			6
 #define T68_CMD_OFFSET			70
-#define MXT_T68_TIMEOUT			200	/* 200ms needed for 3072M1E */
+#define MXT_T68_TIMEOUT			500	/* 500ms needed for 3072M1HC */
 
 /* T68 cmd definitions */
 #define T68_CMD_NONE		0
@@ -603,6 +603,7 @@ struct mxt_data {
 	u8 bootloader_addr;
 	u8 *msg_buf;
 	u8 t6_status;
+	u8 t160_err_count;
 	bool update_input;
 	bool update_input_sec;
 	u8 last_message_count;
@@ -996,6 +997,8 @@ static int mxt_wait_for_completion(struct mxt_data *data,
 		debug_msg = "crc_completion";
 	else if (comp == &data->t68_completion)
 		debug_msg = "t68_completion";
+	else if (comp == &data->t160_completion)
+		debug_msg = "t160_completion";
 	else
 		debug_msg = "unknown_completion";
 
@@ -1005,7 +1008,8 @@ static int mxt_wait_for_completion(struct mxt_data *data,
 	} else if (ret == 0) {
 		dev_err(dev, "[%s] Wait for completion timed out.\n",
 			debug_msg);
-		return -ETIMEDOUT;
+		if (comp == &data->t68_completion)	/* Return only T68 */
+			return -ETIMEDOUT;
 	} else if (ret == -ERESTARTSYS) {
 		dev_warn(dev, "Completion event was interrupted\n");
 	}
@@ -1109,6 +1113,8 @@ static bool mxt_lookup_chips(struct mxt_data *data)
 			break;
 		case 0x01:	/* mXT3071M1 */
 			dev_info(dev, "Found mXT3071M1E\n");
+			hc->hc_capable = true;
+			dev_info(dev, "Device is HC capable\n");
 			break;
 		case 0x0B:	/* mXT3071M1_HC */
 			dev_info(dev, "Found mXT3072M1_HC\n");
@@ -1921,7 +1927,7 @@ static void mxt_proc_t160_messages(struct mxt_data *data, u8 *msg)
 	}
 
 	if (data->hc.reqd_device != data->hc.devid_num) {
-		dev_warn(dev,
+		dev_dbg(dev,
 			 "Requested[%d] and current[%d] device not equal\n",
 			 data->hc.reqd_device, data->hc.devid_num);
 	} else {
@@ -1933,10 +1939,20 @@ static void mxt_proc_t160_messages(struct mxt_data *data, u8 *msg)
 		data->hc.num_client_spt);
 
 	if (err_code) {
-		dev_info(dev, "Error id %x, Error code %x", err_devid,
+		dev_err(dev, "Error id %x, Error code %x", err_devid,
 			 err_code);
-		dev_info(dev, "Error bytes %x %x", (msg[6] & 0xFF),
+		dev_err(dev, "Error bytes %x %x", (msg[6] & 0xFF),
 			(msg[7] & 0xFF));
+
+		data->t160_err_count++;
+
+		if (data->t160_err_count == 5) {
+			dev_err(dev, "T160 error, IRQ disabled, reset required\n");
+			data->irq_processing = false;
+		}
+	} else {
+		data->t160_err_count = 0;
+		data->irq_processing = true;
 	}
 
 	complete(&data->t160_completion);
@@ -1950,11 +1966,11 @@ static void mxt_proc_t68_messages(struct mxt_data *data, u8 *msg)
 
 	if (data->t68_last_frame) {
 		if (data_crc != data->t68_data_crc) {
-			dev_err(dev, "T68 programmed data crc 0x%06X, does not match file CRC 0x%06X\n",
-			data_crc, data->t68_data_crc);
+			dev_err(dev, "T68 data crc 0x%06X, does not match file CRC 0x%06X\n",
+				data_crc, data->t68_data_crc);
 		} else {
-			dev_info(dev, "T68 programmed data and file CRC match = 0x%06X\n",
-				data_crc);
+			dev_info(dev, "T68 data and file CRC match = 0x%06X\n",
+				 data_crc);
 		}
 
 		data->t68_last_frame = false;
@@ -1989,22 +2005,23 @@ static void mxt_proc_t6_messages(struct mxt_data *data, u8 *msg)
 	u8 devid_num = 0;
 	int ret;
 
-	/* TBD - T5 crc handling */
-	if (data->hc.hc_mode) {
+	if (!data->crc_enabled)
 		devid_num = msg[data->T5_msg_size - 1];
-
-		if (nvm_crc != data->nvm_dev_crc[devid_num]) {
-			data->nvm_dev_crc[devid_num] = nvm_crc;
-			dev_info(dev, "Device NVM checksum[%d]: 0x%06X\n",
-				 devid_num, data->nvm_dev_crc[devid_num]);
-		}
-	}
 
 	/* Device checksum */
 	if (crc != data->dev_cfg_crc[devid_num]) {
 		data->dev_cfg_crc[devid_num] = crc;
 		dev_info(dev, "Device checksum[%d]: 0x%06X\n",
 			 devid_num, data->dev_cfg_crc[devid_num]);
+	}
+
+	/* Only update if NVM exists in configuration */
+	if (data->hc.hc_capable) {
+		if (nvm_crc != data->nvm_dev_crc[devid_num]) {
+			data->nvm_dev_crc[devid_num] = nvm_crc;
+			dev_info(dev, "Device NVM checksum[%d]: 0x%06X\n",
+				 devid_num, data->nvm_dev_crc[devid_num]);
+		}
 	}
 
 	complete(&data->crc_completion);
@@ -2677,7 +2694,8 @@ static int mxt_t6_command(struct mxt_data *data, u16 cmd_offset,
 	return 0;
 }
 
-static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
+static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value,
+			   bool clear_crc)
 {
 	int i;
 	/*
@@ -2685,12 +2703,13 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 	 * downloaded.
 	 */
 
-	for (i = 0; i < data->hc.num_of_devs; i++) {
-		if (i == HC_DEV_MAX)
-			break;
-
-		data->dev_cfg_crc[i] = 0;
-	}
+	if (clear_crc)
+		for (i = 0; i < data->hc.num_of_devs; i++) {
+			if (i == HC_DEV_MAX)
+				break;
+			data->nvm_dev_crc[i] = 0;
+			data->dev_cfg_crc[i] = 0;
+		}
 
 	if ((!data->crc_enabled))
 		reinit_completion(&data->crc_completion);
@@ -2705,7 +2724,6 @@ static void mxt_update_crc(struct mxt_data *data, u8 cmd, u8 value)
 	if (!(data->crc_enabled))
 		mxt_wait_for_completion(data, &data->crc_completion,
 					MXT_CRC_TIMEOUT);
-
 }
 
 #ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
@@ -3402,11 +3420,13 @@ static bool mxt_object_is_volatile(struct mxt_data *data, uint16_t object_type)
 }
 
 static int mxt_handle_t160_cmd(struct mxt_data *data, u8 devid, u16 readsize,
-		u8 cmd)
+			       u8 cmd, bool wait)
 {
 	struct device *dev = &data->client->dev;
 	u8 value[5];
 	int ret;
+
+	reinit_completion(&data->t160_completion);
 
 	data->hc.reqd_device = devid;
 
@@ -3425,23 +3445,12 @@ static int mxt_handle_t160_cmd(struct mxt_data *data, u8 devid, u16 readsize,
 					  value, data, 0);
 	}
 
-	if (ret) {
-		dev_err(dev, "Failed to send multi-chip CMD\n");
-		goto reinit;
-	}
-
-	if (data->system_power_up != true) {
+	if (wait) {
 		ret = mxt_wait_for_completion(data, &data->t160_completion,
 					      MXT_T160_TIMEOUT);
-		if (ret) {
+		if (ret)
 			dev_err(dev, "Multi-chip message not recvd\n");
-			goto reinit;
-		}
 	}
-
-reinit:
-
-	reinit_completion(&data->t160_completion);
 
 	return ret;
 }
@@ -3556,6 +3565,8 @@ static int mxt_t68_command(struct mxt_data *data, u8 cmd)
 
 	dev_dbg(dev, "Writing 0x%02X to CMD register", cmd);
 
+	reinit_completion(&data->t68_completion);
+
 	if (!data->crc_enabled) {
 		ret = __mxt_write_reg(client, data->T68_address +
 				      T68_CMD_OFFSET, 1, &cmd, data);
@@ -3570,9 +3581,14 @@ static int mxt_t68_command(struct mxt_data *data, u8 cmd)
 		return ret;
 	}
 
-	reinit_completion(&data->t68_completion);
+	/* Return error if timeout */
+	ret = mxt_wait_for_completion(data, &data->t68_completion,
+	      MXT_T68_TIMEOUT);
 
-	mxt_wait_for_completion(data, &data->t68_completion, MXT_T68_TIMEOUT);
+	if (ret == -ETIMEDOUT) {
+		dev_warn(dev, "T68 payload may not have been programmed\n");
+		ret = 0;
+	}
 
 	return ret;
 }
@@ -3640,7 +3656,7 @@ static int mxt_t68_send_frames(struct mxt_data *data)
 
 		if (frame == 1) {
 			cmd = T68_CMD_START;
-		} else if (offset >= data->t68_length) {
+		} else if ((data->t68_length - offset) < data->t68_datasize) {
 			cmd = T68_CMD_END;
 			data->t68_last_frame = true;
 		} else {
@@ -3650,8 +3666,10 @@ static int mxt_t68_send_frames(struct mxt_data *data)
 		offset += data_size;
 
 		ret = mxt_t68_command(data, cmd);
-		if (ret)
+		if (ret) {
 			dev_err(dev, "Write t68 command failed\n");
+			return ret;
+		}
 
 		frame++;
 	}
@@ -3726,6 +3744,7 @@ static int mxt_upload_t68_payload(struct mxt_data *data, struct mxt_cfg *cfg)
 		goto release;
 	}
 
+	/* Zero only once */
 	ret = mxt_t68_zero_data(data);
 	if (ret) {
 		dev_err(dev, "Error zeroing content of T68\n");
@@ -3788,7 +3807,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 	int totalBytesToWrite = 0;
 	unsigned int first_obj_type = 0;
 	unsigned int first_obj_addr = 0;
-	int ret, error;
+	int ret, error = 0;
 	int byte_offset = 0;
 	char newline;
 	u8 tmpval, val;
@@ -3801,7 +3820,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 	/* Loop until end of raw file */
 	while (cfg->raw_pos < cfg->raw_size) {
-	       dev_dbg(dev, "%s %d, %s %d %s %d %s %d\n",
+	       dev_dbg(dev, "%s %d %s %d %s %d %s %zu\n",
 		       "cfg->object_skipped_ofs", cfg->object_skipped_ofs,
 		       "first_obj_addr", first_obj_addr,
 		       "cfg->start_ofs", cfg->start_ofs,
@@ -3816,11 +3835,23 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 			cfg->object_skipped_ofs = 0;
 			first_obj_type = 0;
 			cfg->mem_size = data->mem_size;
+
+			if (data->hc.hc_mode)
+				error = mxt_handle_t160_cmd(data, dev_id, 1,
+						    HC_DEV_SELECT, true);
+			if (error)
+				return error;
 			continue;
 		} else if ((!strncmp(tmp, "DEVICE_1", 8)) ||
 			   (!strncmp(tmp, "[DEVICE_1", 9))) {
 			dev_id = 1;
 			cfg->raw_pos += offset;
+
+			if (data->hc.hc_mode)
+				error = mxt_handle_t160_cmd(data, dev_id, 1,
+					HC_DEV_SELECT, true);
+			if (error)
+				return error;
 			continue;
 		} else {
 			/* Read type, instance, length */
@@ -3919,8 +3950,10 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 			error = mxt_upload_t68_payload(data, cfg);
 
-			if (error)
+			if (error) {
 				dev_err(dev, "T68 write err, behavior may be unexpected");
+				return error;	/* Return error and stop */
+			}
 
 			continue;
 		}
@@ -3951,7 +3984,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 				/* Adjust config memory size, less to program */
 				/* Only for non-volatile T objects */
 				cfg->mem_size--;
-				dev_dbg(dev, "cfg->mem_size [%d]\n",
+				dev_dbg(dev, "cfg->mem_size [%zu]\n",
 					cfg->mem_size);
 
 			}
@@ -4065,14 +4098,6 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 
 		totalBytesToWrite = size;
 
-		if (data->hc.hc_mode) {
-			/* Set Host_Client before write */
-			error = mxt_handle_t160_cmd(data, dev_id, 1,
-						    HC_DEV_SELECT);
-			if (error)
-				return error;
-		}
-
 		/* Write per object per inst per obj_size w/data in cfg.mem */
 		while (totalBytesToWrite > 0) {
 
@@ -4154,6 +4179,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	bool upd_cfg_reqd = false;
 	u8 num_of_elements = 1;
 	int num_of_bytes;
+	bool skip_backup = false;
 	u16 crc_start = 0;
 	int offset;
 	int error;
@@ -4167,7 +4193,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	cfg.raw_size = fw->size;
 
-	mxt_update_crc(data, MXT_COMMAND_REPORTALL, 1);
+	mxt_update_crc(data, MXT_COMMAND_REPORTALL, 1, true);
 
 	//Clear messages after update in cases /CHG low
 	error = mxt_process_messages_until_invalid(data, true);
@@ -4339,7 +4365,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 		}
 
 		if (data->dev_cfg_crc[i] == 0) {
-			dev_info(dev, "Device cfg crc_%d is zero", i);
+			dev_info(dev, "Device config_crc[%d] is zero", i);
 			upd_cfg_reqd = true;
 		}
 
@@ -4352,7 +4378,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 		if ((!strncmp(tmp, "DEVICE_0", 8)) ||
 		    (!strncmp(tmp, "[DEVICE_0", 9))) {
-			dev_info(dev, "Found first Device\n");
+			dev_dbg(dev, "Found first Device\n");
 		} else {
 			for (i = 0; i < data->hc.num_of_devs; i++) {
 				ret = sscanf(cfg.raw + cfg.raw_pos, "%x%n",
@@ -4361,8 +4387,8 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 					dev_warn(dev,
 						 "Bad format: NVM checksum not present\n");
 
-				dev_info(dev, "NVM cfg checksum[%d]: 0x%06X",
-				 	i, data->nvm_cfg_crc[i]);
+				dev_info(dev, "Config NVM checksum[%d]: 0x%06X",
+					 i, data->nvm_cfg_crc[i]);
 
 				cfg.raw_pos += offset;
 			}
@@ -4386,18 +4412,20 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 			goto release_config_crc;
 		}
 	} else {
-		dev_warn(dev, "Device and file info_crc does not match\n");
-		dev_warn(dev, "Device 0x%06X, File 0x%06X\nFailed programming",
+		dev_warn(dev, "Device and file infoblock crc do not match\n");
+		dev_warn(dev, "Device 0x%06X, File 0x%06X. Failed programming",
 			 data->info_crc, info_crc);
 		goto release_config_crc;
 	}
 
 	/* Freeze the devide for programming if hc_capable */
 	if (data->hc.hc_capable) {
-		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_FREEZE);
+		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_FREEZE,
+			       false);
 	} else {
 		/* Stop T70 Dynamic Configuration before calculation of CRC */
-		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_W_STOP);
+		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_W_STOP,
+			       false);
 	}
 
 	/* Malloc memory to store configuration */
@@ -4443,7 +4471,7 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
 		for (i = 0; i < data->hc.num_of_devs; i++) {
-			dev_dbg(dev, "%s %d %s %d %s %i\n",
+			dev_dbg(dev, "%s %d %s %d %s %zu\n",
 				 "crc_start", crc_start,
 				 "cfg.object_skipped_ofs",
 				 cfg.object_skipped_ofs,
@@ -4464,10 +4492,13 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 
 	msleep(50);	//Allow delay before issuing backup and reset
 
-	if (data->hc.hc_mode)
-		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_UNFREEZE);
+	if (data->hc.hc_capable)
+		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_UNFREEZE,
+			       false);
 
-	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE);
+	if (!skip_backup)
+		mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE,
+			       true);
 
 	msleep(100);	//Allow 100ms before issuing reset
 
@@ -4502,12 +4533,6 @@ static int mxt_update_cfg(struct mxt_data *data, const struct firmware *fw)
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
 	/* T7 config may have changed */
 		mxt_init_t7_power_cfg(data);
-
-		if (data->hc.hc_mode  && data->hc.devid_num != 0) {
-			error = mxt_handle_t160_cmd(data, 0, 1, HC_DEV_SELECT);
-			if (error)
-				dev_warn(dev, "Warning, Host client mode unknown\n");
-		}
 
 		error = mxt_check_retrigen(data);
 
@@ -4556,7 +4581,7 @@ static int mxt_clear_cfg(struct mxt_data *data)
 		goto release_mem;
 	}
 
-	dev_dbg(dev, "clear_cfg: config.mem_size %i, config.start_ofs %i\n",
+	dev_dbg(dev, "clear_cfg: config.mem_size %zu, config.start_ofs %i\n",
 		config.mem_size, config.start_ofs);
 
 	while (totalBytesToWrite > 0) {
@@ -4596,7 +4621,7 @@ static int mxt_clear_cfg(struct mxt_data *data)
 		totalBytesToWrite = totalBytesToWrite - writeByteSize;
 	}
 
-	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE);
+	mxt_update_crc(data, MXT_COMMAND_BACKUPNV, MXT_BACKUP_VALUE, true);
 
 	msleep(300);
 
@@ -5240,9 +5265,9 @@ static int mxt_read_info_block(struct mxt_data *data)
 	if (error)
 		dev_warn(&client->dev, "Warning, encryption state unknown\n");
 
-	if (data->hc.hc_capable) {
+	if (data->hc.hc_capable && data->hc.hc_mode) {
 		/* Set default to Host, update HC global parameters */
-		error = mxt_handle_t160_cmd(data, 0, 1, HC_DEV_SELECT);
+		error = mxt_handle_t160_cmd(data, 0, 1, HC_DEV_SELECT, false);
 		if (error)
 			dev_warn(&client->dev, "Warning, Host client mode unknown\n");
 	}
@@ -6077,12 +6102,6 @@ static int mxt_initialize(struct mxt_data *data)
 
 	data->system_power_up = true;
 
-	if (data->hc.hc_mode  && data->hc.devid_num != 0) {
-		error = mxt_handle_t160_cmd(data, 0, 1, HC_DEV_SELECT);
-		if (error)
-			dev_warn(&client->dev, "Warning, Host client mode unknown\n");
-	}
-
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
 		error = mxt_check_retrigen(data);
 		if (error)
@@ -6639,10 +6658,11 @@ static int mxt_configure_objects(struct mxt_data *data,
 	struct device *dev = &data->client->dev;
 	int error;
 
-	if (data->hc.hc_mode  && data->hc.devid_num != 0) {
-		error = mxt_handle_t160_cmd(data, 0, 1, HC_DEV_SELECT);
+	if (data->hc.hc_mode && data->hc.devid_num != 0) {
+		error = mxt_handle_t160_cmd(data, 0, 1, HC_DEV_SELECT, true);
 		if (error)
-			dev_warn(dev, "Warning, Host client mode unknown\n");
+			dev_warn(dev,
+				 "Config_object: Warning, Host client mode unknown\n");
 	}
 
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENC_FLAG))) {
@@ -6732,7 +6752,7 @@ static ssize_t config_crc_show(struct device *dev,
 	struct mxt_data *data = dev_get_drvdata(dev);
 
 	for (i = 0; i < data->hc.num_of_devs; i++)
-		count += scnprintf(buf, PAGE_SIZE, "%06x\n",
+		count += scnprintf(buf + count, PAGE_SIZE, "0x%06X\n",
 			 data->dev_cfg_crc[i]);
 
 	return count;
@@ -7681,6 +7701,7 @@ static int mxt_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	init_completion(&data->t160_completion);
 	mutex_init(&data->i2c_lock);
 	data->system_power_up = true;
+	data->hc.num_of_devs = 0x01;
 
 	data->suspend_mode = dmi_check_system(chromebook_T9_suspend_dmi) ?
 		MXT_SUSPEND_T9_CTRL : MXT_SUSPEND_DEEP_SLEEP;

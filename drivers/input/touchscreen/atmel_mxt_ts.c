@@ -3890,7 +3890,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 					"cfg->start_ofs",
 					cfg->start_ofs);
 
-				cfg->mem_size -= first_obj_addr;
+				cfg->mem_size -= cfg->object_skipped_ofs;
 			}
 		}
 

@@ -16,7 +16,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250516"
+#define DRIVER_VERSION_NUMBER "4.19-20250522"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -146,7 +146,7 @@
 #define MXT_SPT_PEAKRESTORATION_T161		   161
 #define MXT_SPT_EVENTCOUNTER_T170		   170
 #define MXT_PROCI_KDCUSTOMCONFIG_T240		   240
-#define MXT_RESERVED_T242			   242
+#define MXT_SPT_MCCUSTOMCONFIG_T242		   242
 
 /* T2 status bits */
 #define CONFIGENCEN		BIT(1)
@@ -1910,6 +1910,8 @@ static int mxt_check_encryption(struct mxt_data *data)
 	return ret;
 }
 
+static int mxt_soft_reset(struct mxt_data *data, bool reset_enabled);
+
 static void mxt_proc_t160_messages(struct mxt_data *data, u8 *msg)
 {
 	struct device *dev = &data->client->dev;
@@ -1948,11 +1950,10 @@ static void mxt_proc_t160_messages(struct mxt_data *data, u8 *msg)
 
 		if (data->t160_err_count == 5) {
 			dev_err(dev, "T160 error, IRQ disabled, reset required\n");
-			data->irq_processing = false;
+			mxt_soft_reset(data, true);
 		}
 	} else {
 		data->t160_err_count = 0;
-		data->irq_processing = true;
 	}
 
 	complete(&data->t160_completion);
@@ -2759,8 +2760,6 @@ static void mxt_backup_config(struct mxt_data *data, u8 cmd, u8 value,
 }
 #endif
 
-static int mxt_soft_reset(struct mxt_data *data, bool reset_enabled);
-
 #ifdef CONFIG_TOUCHSCREEN_DIAGNOSTICS_T33
 static int mxt_disable_p2p_sct_on_error(struct mxt_data *data)
 {
@@ -3095,11 +3094,10 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 	if (data->crc_err_count > 0x03 && data->crc_enabled
 		&& data->is_resync_enabled) {
 		ret = mxt_resync_comm(data);
-		return IRQ_HANDLED;
-	}
 
-	if (ret) {
-		dev_dbg(dev, "Error occurred during resync (%d)\n", ret);
+		if (ret)
+			dev_dbg(dev, "Error occurred during resync (%d)\n", ret);
+
 		return IRQ_HANDLED;
 	}
 
@@ -3901,7 +3899,7 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 			/* T68 must be last packet in file */
 			dev_info(dev, "T68 payload found\n");
 
-			data->t68_datatype = (instance & 0x000F);
+			data->t68_datatype = (instance & 0x00FF);
 
 			/* Allocate data to struct first */
 			data->t68_buf = kzalloc((size + 1), GFP_KERNEL);

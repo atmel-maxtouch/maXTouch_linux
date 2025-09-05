@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20241115.0.enc"
+#define DRIVER_VERSION_NUMBER "4.19-20250904.0.enc"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -60,7 +60,7 @@
 /* Registers */
 #define MXT_OBJECT_START	0x07
 #define MXT_INFO_CHECKSUM_SIZE	3
-#define MXT_MAX_BLOCK_WRITE	256
+#define MXT_MAX_BLOCK_RD_WR	256
 
 /* Objects */
 #define MXT_GEN_ENCRYPTIONSTATUS_T2	2
@@ -571,7 +571,7 @@ struct mxt_crc {
 /* Each client has this additional data */
 struct mxt_data {
 	struct i2c_client *client;
-	struct mutex i2c_lock;	/* Avoid conflict on I2C bus accessing tx_seq_num */
+	struct mutex i2c_lock;	/* Avoid conflict on I2C bus, tx_seq_num, sysfs_rd */
 	struct input_dev *input_dev;
 	struct input_dev *input_dev_sec;
 #ifdef CONFIG_TOUCHSCREEN_KNOB_SUPPORT
@@ -1407,7 +1407,7 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 	mutex_lock(&data->i2c_lock);
 
 	/* Send write address on power up only */
-	if ((crc8 || (reg == data->T144_address)) && data->system_power_up) {
+	if ((crc8 || (reg == data->T144_address))) {
 
 		buf[0] = reg & 0xff;
 		buf[1] = ((reg >> 8) & 0xff);
@@ -1967,6 +1967,8 @@ static int mxt_read_block(struct mxt_data *data, u16 reg, u16 len, void *val,
 		w_hdr_size = 0x02;
 	}
 
+	mutex_lock(&data->i2c_lock);	/* Lock i2c transfer */
+
 	ret = i2c_master_send(data->client, txheader, w_hdr_size);
 	if (ret != w_hdr_size) {
 		dev_err(dev, "%s: i2c send failed (%d)\n",
@@ -2045,6 +2047,8 @@ static int mxt_read_block(struct mxt_data *data, u16 reg, u16 len, void *val,
 	}
 #endif
 	
+	mutex_unlock(&data->i2c_lock);	/* Lock i2c transfer */
+
 	/* Return only data requested into val buffer */
 	memcpy(((u8*) val), databuf, len);
 
@@ -3095,6 +3099,7 @@ static int mxt_read_and_process_messages(struct mxt_data *data, u8 count, bool c
 		return -EINVAL;
 	}
 
+	/* T5_msg_buf[0] - reserved for msg count */
 	for (i = 0; i < count; i++) {
 		if (data->crc_enabled){
 			ret = __mxt_read_reg_crc(data->client, data->T5_address,
@@ -3146,7 +3151,6 @@ static irqreturn_t mxt_process_messages_t44_t144(struct mxt_data *data)
 		//dev_info(dev, "t44_t144: Reading msg \n");
 		ret = mxt_read_block(data, data->T44_address,
 			data->T5_msg_size + 1, data->T5_msg_buf, false);
-
 	} else {
 		ret = __mxt_read_reg_crc(data->client, data->T144_address, 
 			2, data->T5_msg_buf, data, true);		
@@ -4031,8 +4035,8 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 		/* Write per object per instance per obj_size w/data in cfg.mem */
 		while (totalBytesToWrite > 0) {
 
-			if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE)
-				size = MXT_MAX_BLOCK_WRITE;
+			if (totalBytesToWrite > MXT_MAX_BLOCK_RD_WR)
+				size = MXT_MAX_BLOCK_RD_WR;
 			else 
 				size = totalBytesToWrite;
 
@@ -4460,8 +4464,8 @@ static int mxt_clear_cfg(struct mxt_data *data)
 
 			writeByteSize = data->enc_blocksize;
 
-		} else if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE) {
-			writeByteSize = MXT_MAX_BLOCK_WRITE;
+		} else if (totalBytesToWrite > MXT_MAX_BLOCK_RD_WR) {
+			writeByteSize = MXT_MAX_BLOCK_RD_WR;
 		} else {
 			writeByteSize = totalBytesToWrite;
 		}
@@ -7312,8 +7316,8 @@ static int mxt_check_mem_access_params(struct mxt_data *data, loff_t off,
 
 	/* TBD - DEV or CFG only check */
 	if (!(CHECK_BIT(data->encryption_state, DEV_ENCRYPTED))) {
-		if (*count > MXT_MAX_BLOCK_WRITE)
-			*count = MXT_MAX_BLOCK_WRITE;
+		if (*count > MXT_MAX_BLOCK_RD_WR)
+			*count = MXT_MAX_BLOCK_RD_WR;
 	}
 
 	return 0;

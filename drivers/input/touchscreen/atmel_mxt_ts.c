@@ -16,7 +16,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250630"
+#define DRIVER_VERSION_NUMBER "4.19-20250905"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -57,7 +57,7 @@
 /* Registers */
 #define MXT_OBJECT_START	0x07
 #define MXT_INFO_CRC_SIZE	3
-#define MXT_MAX_BLOCK_WRITE	256
+#define MXT_MAX_BLOCK_RD_WR	256
 
 /* Objects */
 #define MXT_GEN_ENCRYPTIONSTATUS_T2	2
@@ -1500,7 +1500,7 @@ static int __mxt_read_reg_crc(struct i2c_client *client,
 
 	mutex_lock(&data->i2c_lock);
 
-	if ((crc8 || reg == data->T144_address) && data->system_power_up) {
+	if ((crc8 || (reg == data->T144_address))) {
 		buf[0] = reg & 0xff;
 		buf[1] = ((reg >> 8) & 0xff);
 		buf[2] = mxt_update_seq_num(data, false, 0x00);
@@ -4099,8 +4099,8 @@ static int mxt_prepare_cfg_mem(struct mxt_data *data, struct mxt_cfg *cfg)
 		/* Write per object per inst per obj_size w/data in cfg.mem */
 		while (totalBytesToWrite > 0) {
 
-			if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE)
-				size = MXT_MAX_BLOCK_WRITE;
+			if (totalBytesToWrite > MXT_MAX_BLOCK_RD_WR)
+				size = MXT_MAX_BLOCK_RD_WR;
 			else
 				size = totalBytesToWrite;
 
@@ -4588,8 +4588,8 @@ static int mxt_clear_cfg(struct mxt_data *data)
 
 			writeByteSize = data->enc_blocksize;
 
-		} else if (totalBytesToWrite > MXT_MAX_BLOCK_WRITE) {
-			writeByteSize = MXT_MAX_BLOCK_WRITE;
+		} else if (totalBytesToWrite > MXT_MAX_BLOCK_RD_WR) {
+			writeByteSize = MXT_MAX_BLOCK_RD_WR;
 		} else {
 			writeByteSize = totalBytesToWrite;
 		}
@@ -6734,7 +6734,7 @@ static int mxt_configure_objects(struct mxt_data *data,
 
 	data->irq_processing = true;
 	/* TBD - Review change in SPI interface */
-	//data->system_power_up = false;
+	data->system_power_up = false;
 	data->sysfs_updating_cfg_fw = false;
 
 	return 0;
@@ -7346,8 +7346,8 @@ static int mxt_check_mem_access_params(struct mxt_data *data, loff_t off,
 	if (off + *count > data->mem_size)
 		*count = data->mem_size - off;
 
-	if (*count > MXT_MAX_BLOCK_WRITE)
-		*count = MXT_MAX_BLOCK_WRITE;
+	if (*count > MXT_MAX_BLOCK_RD_WR)
+		*count = MXT_MAX_BLOCK_RD_WR;
 
 	return 0;
 }

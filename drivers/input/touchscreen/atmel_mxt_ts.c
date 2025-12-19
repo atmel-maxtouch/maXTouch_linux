@@ -15,7 +15,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250904.0.enc"
+#define DRIVER_VERSION_NUMBER "4.19-20251218.0.enc"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -2046,11 +2046,11 @@ static int mxt_read_block(struct mxt_data *data, u16 reg, u16 len, void *val,
 		}
 	}
 #endif
-	
-	mutex_unlock(&data->i2c_lock);	/* Lock i2c transfer */
 
 	/* Return only data requested into val buffer */
 	memcpy(((u8*) val), databuf, len);
+
+	mutex_unlock(&data->i2c_lock);	/* Lock i2c transfer */
 
 	kfree(readbuf);
 	readbuf = NULL;
@@ -6603,6 +6603,15 @@ ssize_t mxt_fw_version_show(struct device *dev,
 			 info->version >> 4, info->version & 0xf, info->build);
 }
 
+/* Firmware Version is returned as Major.Minor.Build */
+ssize_t mxt_drvr_version_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+			 DRIVER_VERSION_NUMBER);
+}
+
 static ssize_t mxt_tx_seq_number_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
@@ -7382,6 +7391,7 @@ static ssize_t mxt_mem_access_write(struct file *filp, struct kobject *kobj,
 
 static DEVICE_ATTR(fw_version, S_IRUGO, mxt_fw_version_show, NULL);
 static DEVICE_ATTR(hw_version, S_IRUGO, mxt_hw_version_show, NULL);
+static DEVICE_ATTR(drvr_version, S_IRUGO, mxt_drvr_version_show, NULL);
 static DEVICE_ATTR(tx_seq_num, S_IWUSR | S_IRUSR, mxt_tx_seq_number_show,
 		   mxt_tx_seq_number_store);
 static DEVICE_ATTR(object, S_IRUGO, mxt_object_show, NULL);
@@ -7413,6 +7423,7 @@ static DEVICE_ATTR(iv_data, S_IWUSR | S_IRUGO, mxt_iv_data_show, mxt_iv_data_sto
 static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
+	&dev_attr_drvr_version.attr,
 	&dev_attr_tx_seq_num.attr,
 	&dev_attr_debug_irq.attr,
 	&dev_attr_crc_enable.attr,

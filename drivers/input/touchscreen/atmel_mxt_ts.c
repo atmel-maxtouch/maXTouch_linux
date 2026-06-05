@@ -16,7 +16,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20250905"
+#define DRIVER_VERSION_NUMBER "4.19-20260506"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -57,7 +57,7 @@
 /* Registers */
 #define MXT_OBJECT_START	0x07
 #define MXT_INFO_CRC_SIZE	3
-#define MXT_MAX_BLOCK_RD_WR	256
+#define MXT_MAX_BLOCK_RD_WR	255
 
 /* Objects */
 #define MXT_GEN_ENCRYPTIONSTATUS_T2	2

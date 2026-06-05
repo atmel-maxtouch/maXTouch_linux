@@ -16,7 +16,7 @@
  *
  */
 
-#define DRIVER_VERSION_NUMBER "4.19-20260605"
+#define DRIVER_VERSION_NUMBER "4.19-20260605-v2"
 
 #include <linux/version.h>
 #include <linux/acpi.h>
@@ -6781,6 +6781,14 @@ ssize_t fw_version_show(struct device *dev,
 			 info->version >> 4, info->version & 0xf, info->build);
 }
 
+/* Return driver version as a string */
+static ssize_t drvr_version_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+		DRIVER_VERSION_NUMBER);
+} 
+
 static ssize_t tx_seq_number_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
@@ -7414,6 +7422,7 @@ static ssize_t mxt_mem_access_write(struct file *filp, struct kobject *kobj,
 
 static DEVICE_ATTR_RO(fw_version);
 static DEVICE_ATTR_RO(hw_version);
+static DEVICE_ATTR_RO(drvr_version);
 static DEVICE_ATTR_RO(objects);
 static DEVICE_ATTR_RO(crc_enabled);
 static DEVICE_ATTR_RO(debug_notify);
@@ -7436,6 +7445,7 @@ static DEVICE_ATTR(mxt_reset, 0600, reset_show, reset_store);
 static struct attribute *mxt_attrs[] = {
 	&dev_attr_fw_version.attr,
 	&dev_attr_hw_version.attr,
+	&dev_attr_drvr_version.attr,
 	&dev_attr_tx_seq_num.attr,
 	&dev_attr_debug_irq.attr,
 	&dev_attr_crc_enabled.attr,
